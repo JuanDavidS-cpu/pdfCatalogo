@@ -1,0 +1,13 @@
+fastapi>=0.116
+uvicorn[standard]>=0.35
+python-multipart>=0.0.20
+pymupdf>=1.26
+pillow>=11
+numpy>=2.2
+opencv-python-headless>=4.12
+requests>=2.32
+ddgs>=9.6
+ollama>=0.5
+docling-parse>=7
+paddlepaddle>=3.2
+paddleocr[doc-parser]>=3.6.0
