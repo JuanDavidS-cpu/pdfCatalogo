@@ -15,6 +15,7 @@
 pdfjsLib.GlobalWorkerOptions.workerSrc="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
 const { jsPDF } = window.jspdf;
 const $=id=>document.getElementById(id),state=[];
+const FRAGANTICA_API="/api/fragrantica";
 const fileInput=$("file"), drop=document.querySelector(".drop");
 
 fileInput.addEventListener("change",e=>{
@@ -33,6 +34,41 @@ function nameFromText(items){
  const bad=/^(ml|oz|eau de parfum|eau de toilette|parfum|perfume|hombre|mujer|men|women|masculino|femenino|original|unisex)$/i;
  const a=items.map(x=>(x.str||"").replace(/\s+/g," ").trim()).filter(x=>x.length>2&&!bad.test(x)&&!/^[\d\W]+$/.test(x));
  return a.sort((x,y)=>y.length-x.length)[0]||"Perfume";
+}
+
+function trimProductImage(src){
+ return new Promise(resolve=>{
+  const im=new Image();
+  im.onload=()=>{
+   const w=im.naturalWidth,h=im.naturalHeight,c=document.createElement("canvas");
+   c.width=w;c.height=h;const x=c.getContext("2d");x.drawImage(im,0,0);
+   const d=x.getImageData(0,0,w,h).data;
+   const samples=[];
+   for(const [px,py] of [[0,0],[w-1,0],[0,h-1],[w-1,h-1]]){const j=(py*w+px)*4;samples.push([d[j],d[j+1],d[j+2]])}
+   const bg=samples.reduce((a,b)=>[a[0]+b[0],a[1]+b[1],a[2]+b[2]],[0,0,0]).map(v=>v/4);
+   let minX=w,minY=h,maxX=-1,maxY=-1;
+   const threshold=32;
+   for(let yy=0;yy<h;yy++)for(let xx=0;xx<w;xx++){
+    const j=(yy*w+xx)*4,dist=Math.abs(d[j]-bg[0])+Math.abs(d[j+1]-bg[1])+Math.abs(d[j+2]-bg[2]);
+    if(d[j+3]>15 && dist>threshold){minX=Math.min(minX,xx);minY=Math.min(minY,yy);maxX=Math.max(maxX,xx);maxY=Math.max(maxY,yy)}
+   }
+   if(maxX<0){resolve(src);return}
+   const pad=Math.max(8,Math.round(Math.max(w,h)*.025));
+   minX=Math.max(0,minX-pad);minY=Math.max(0,minY-pad);maxX=Math.min(w-1,maxX+pad);maxY=Math.min(h-1,maxY+pad);
+   const out=document.createElement("canvas");out.width=maxX-minX+1;out.height=maxY-minY+1;
+   out.getContext("2d").drawImage(c,minX,minY,out.width,out.height,0,0,out.width,out.height);
+   resolve(out.toDataURL("image/png"));
+  };
+  im.onerror=()=>resolve(src); im.src=src;
+ });
+}
+
+async function identifyFragrantica(name){
+ try{
+  const r=await fetch(FRAGANTICA_API+"?name="+encodeURIComponent(name));
+  if(!r.ok)return null;
+  return await r.json();
+ }catch(e){return null}
 }
 
 async function readPdf(file){
@@ -85,20 +121,24 @@ async function readPdf(file){
     }
    }catch(err){console.warn("No se pudieron extraer imágenes individuales:",err)}
    if(images.length){
-    images.forEach((src,i)=>state.push({
-     name:i===0?nameFromText(items):"Perfume "+(i+1),
-     src,kind:"extraída"
-    }));
+    for(let i=0;i<images.length;i++){
+     const rawName=i===0?nameFromText(items):"Perfume "+(i+1);
+     const src=await trimProductImage(images[i]);
+     const product={name:rawName,src,kind:"extraída",fragantica:null,confidence:false};
+     state.push(product);
+     const match=await identifyFragrantica(rawName);
+     if(match&&match.name){product.name=match.name;product.fragantica=match.url||null;product.confidence=true}
+    }
    }else{
-    state.push({
-     name:nameFromText(items),
-     src:c.toDataURL("image/jpeg",.9),
-     kind:"página"
-    });
+    const rawName=nameFromText(items);
+    const product={name:rawName,src:await trimProductImage(c.toDataURL("image/jpeg",.9)),kind:"página",fragantica:null,confidence:false};
+    const match=await identifyFragrantica(rawName);
+    if(match&&match.name){product.name=match.name;product.fragantica=match.url||null;product.confidence=true}
+    state.push(product);
    }
    render();
   }
-  $("status").textContent=state.length+" perfumes detectados. Puedes corregir nombres o buscar imágenes faltantes.";
+  $("status").textContent=state.length+" perfumes detectados. Se intentó identificar cada uno con Fragrantica; revisa los marcados como «revisar».";
  }catch(err){
   console.error(err);
   $("status").textContent="No se pudo leer el PDF: "+(err.message||"error desconocido");
@@ -109,9 +149,10 @@ function render(){
  $("grid").innerHTML="";
  state.forEach((p,i)=>{
   const d=document.createElement("article");d.className="card";
-  d.innerHTML='<span class="tag">'+p.kind+'</span><div class="pic"><img src="'+p.src+'" alt=""></div><div class="body"><input value="'+esc(p.name)+'"><div class="actions"><button class="alt find">Buscar imagen</button><button class="alt del">Eliminar</button></div></div>';
+  d.innerHTML='<span class="tag">'+p.kind+(p.confidence?' · Fragrantica ✓':' · revisar')+'</span><div class="pic"><img src="'+p.src+'" alt=""></div><div class="body"><input value="'+esc(p.name)+'"><div class="actions"><button class="alt find">Buscar imagen</button><button class="alt frag">Fragrantica</button><button class="alt del">Eliminar</button></div></div>';
   d.querySelector("input").oninput=e=>p.name=e.target.value;
   d.querySelector(".find").onclick=()=>window.open("https://www.google.com/search?tbm=isch&q="+encodeURIComponent(p.name+" perfume bottle"),"_blank");
+  d.querySelector(".frag").onclick=async()=>{const m=await identifyFragrantica(p.name);if(m&&m.name){p.name=m.name;p.fragantica=m.url||null;p.confidence=true;render()}else window.open("https://www.google.com/search?q="+encodeURIComponent("site:fragrantica.com/perfume "+p.name)," _blank")};
   d.querySelector(".del").onclick=()=>{state.splice(i,1);render()};
   $("grid").appendChild(d);
  });
@@ -127,15 +168,15 @@ $("search").onclick=()=>state.forEach((p,i)=>{
 });
 $("pdf").onclick=()=>{
  if(!state.length){$("status").textContent="Primero carga un PDF.";return}
- const doc=new jsPDF({unit:"mm",format:"a4"}),W=210,H=297,M=13,G=7,C=2,R=3,cw=(W-2*M-G)/C,ch=(H-2*M-G*2)/R;
+ const doc=new jsPDF({unit:"mm",format:"a4"}),W=210,H=297,M=10,G=5,C=2,R=4,cw=(W-2*M-G)/C,ch=(H-2*M-G*3)/R;
  state.forEach((p,i)=>{
-  if(i&&i%6===0)doc.addPage();
-  if(i%6===0){
+  if(i&&i%8===0)doc.addPage();
+  if(i%8===0){
    doc.setFillColor(7,7,7);doc.rect(0,0,W,H,"F");
    doc.setTextColor(225,194,82);doc.setFont("helvetica","bold");doc.setFontSize(19);doc.text("ZUASH",W/2,13,{align:"center"});
    doc.setDrawColor(120,95,25);doc.line(M,17,W-M,17);
   }
-  const k=i%6,x=M+(k%2)*(cw+G),y=23+Math.floor(k/2)*(ch+G);
+  const k=i%8,x=M+(k%2)*(cw+G),y=22+Math.floor(k/2)*(ch+G);
   doc.setFillColor(15,15,15);doc.roundedRect(x,y,cw,ch,3,3,"F");
   doc.setDrawColor(48,48,48);doc.roundedRect(x,y,cw,ch,3,3,"S");
   try{doc.addImage(p.src,p.src.startsWith("data:image/png")?"PNG":"JPEG",x+4,y+5,cw-8,ch-23,undefined,"FAST")}catch(e){console.warn(e)}
