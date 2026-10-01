@@ -17,7 +17,8 @@ button.alt{background:#161616;color:#eee;border-color:#444}.grid{display:grid;gr
 .pic img{max-width:100%;max-height:100%;object-fit:contain}.body{padding:12px}.body input{width:100%;padding:10px;background:#181818;border:1px solid #3a3a3a;border-radius:7px;color:#fff;font-weight:700}
 .actions{display:flex;gap:6px;margin-top:8px}.actions button{flex:1;font-size:11px}.tag{position:absolute;top:8px;left:8px;background:#000d;border:1px solid #6d591d;color:#e3c75d;border-radius:20px;padding:4px 7px;font-size:10px;z-index:2}
 .status{color:#999;font-size:13px;margin:12px 0}.hide{display:none}.meta{color:#777;font-size:11px;line-height:1.45;margin-top:5px}.review{border-color:#8b5b20}
-.progress{height:5px;background:#191919;border-radius:5px;overflow:hidden;margin-top:8px}.progress i{display:block;height:100%;width:0;background:#d9b84a;transition:width .2s}
+.progress{height:8px;background:#191919;border-radius:5px;overflow:hidden;margin-top:9px}.progress i{display:block;height:100%;width:0;background:#d9b84a;transition:width .2s}
+.stage{margin:12px 0 18px;padding:14px;border:1px solid #252525;border-radius:12px;background:#0d0d0d}.stage-head{display:flex;justify-content:space-between;gap:12px}.stage-head b{color:#e5c75d}.stage-head span{font-variant-numeric:tabular-nums;color:#888}.stage-detail{margin-top:5px;color:#aaa;font-size:12px}.stage-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:6px;margin-top:10px}.stage-item{padding:7px 9px;border:1px solid #252525;border-radius:8px;color:#777;font-size:11px}.stage-item.active{border-color:#8b6d24;color:#e0c45a}.stage-item.done{color:#aaa;border-color:#3c3c3c}.stage-item .pct{float:right;color:#888}
 .pill{display:inline-block;padding:4px 8px;border-radius:999px;background:#151515;border:1px solid #2b2b2b;color:#aaa;font-size:11px;margin:3px 3px 0 0}
 </style>
 </head>
@@ -28,7 +29,14 @@ button.alt{background:#161616;color:#eee;border-color:#444}.grid{display:grid;gr
 <div class="sub">PDF → comprensión visual → detección individual → identificación → imagen limpia → catálogo</div>
 <label class="drop"><b>Arrastra cualquier PDF aquí o haz clic para seleccionarlo</b><br><small>El sistema analiza cada página de forma independiente y nunca convierte una página completa en un producto.</small><input id="file" type="file" accept="application/pdf" hidden></label>
 <div id="tools" class="tools hide"><button id="add">＋ Añadir</button><button id="search" class="alt">🔎 Reintentar imágenes</button><span class="grow"></span><button id="pdf">Generar catálogo PDF</button></div>
-<div id="status" class="status"></div><div id="providers"></div><div class="progress"><i id="bar"></i></div><div id="grid" class="grid"></div>
+<div id="status" class="status"></div>
+<div id="stage" class="stage">
+  <div class="stage-head"><b id="stageTitle">Listo</b><span id="elapsed">00:00</span></div>
+  <div class="stage-detail" id="stageDetail">Selecciona un PDF para comenzar.</div>
+  <div class="progress"><i id="bar"></i></div>
+  <div class="stage-grid" id="stageGrid"></div>
+</div>
+<div id="providers"></div><div id="grid" class="grid"></div>
 </main>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
@@ -151,7 +159,20 @@ function render(){
    $("grid").appendChild(d);
  });
 }
+const STAGES=["PDF","Página","Detección","Identificación","Recortes","Imágenes","Exportación"];
+let progressStarted=0,progressTimer=null;
+function initProgress(){progressStarted=Date.now();clearInterval(progressTimer);progressTimer=setInterval(updateElapsed,250);$("stageGrid").innerHTML=STAGES.map(x=>'<div class="stage-item" id="stage-'+x+'">'+x+'<span class="pct">—</span></div>').join('');updateElapsed()}
+function updateElapsed(){const sec=Math.floor((Date.now()-progressStarted)/1000);const m=String(Math.floor(sec/60)).padStart(2,'0'),s=String(sec%60).padStart(2,'0');$("elapsed").textContent=m+':'+s}
 function setProgress(v){$("bar").style.width=clamp(v,0,100)+"%"}
+function stage(name,pct,detail,done=false){
+ const el=$("stage-"+name); if(el){el.className='stage-item '+(done?'done':'active');el.querySelector('.pct').textContent=Math.round(clamp(pct,0,100))+'%'}
+ $("stageTitle").textContent=name+(done?' ✓':'');$("stageDetail").textContent=detail||'';
+}
+function stageDone(name){const el=$("stage-"+name);if(el){el.className='stage-item done';el.querySelector('.pct').textContent='✓'}}
+function slowInference(label,started){
+ const elapsed=Math.round((Date.now()-started)/1000);
+ if(elapsed>=15) $("stageDetail").textContent=label+' · La inferencia está tardando más de lo normal ('+elapsed+' s). El proceso sigue activo…';
+}
 
 $("add").onclick=()=>{state.push({name:"Nuevo perfume",src:"data:image/svg+xml;charset=utf8,"+encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="500" height="500"><rect width="100%" height="100%" fill="#050505"/><text x="50%" y="50%" fill="#d9b84a" text-anchor="middle" font-size="30">ZUASH</text></svg>'),kind:"manual",method:"Manual",page:"—",review:true});render()};
 $("search").onclick=async()=>{
@@ -175,50 +196,65 @@ $("pdf").onclick=()=>{
 async function readPdf(file){
  if(busy)return;
  if(!file||(!file.type.includes("pdf")&&!file.name.toLowerCase().endsWith(".pdf"))){$("status").textContent="Selecciona un PDF válido.";return}
- busy=true;state.length=0;$("tools").classList.remove("hide");$("grid").innerHTML="";$("providers").innerHTML="";setProgress(0);
+ busy=true;state.length=0;$("tools").classList.remove("hide");$("grid").innerHTML="";$("providers").innerHTML="";setProgress(0);initProgress();
  try{
+   stage("PDF",5,"Abriendo y contando páginas…");
    const buf=await file.arrayBuffer();
    const pdf=await pdfjsLib.getDocument({data:new Uint8Array(buf)}).promise;
+   stageDone("PDF");stage("Página",0,"Preparando "+pdf.numPages+" páginas…");
    let used={gemini:false,productSearch:false};
    for(let n=1;n<=pdf.numPages;n++){
-     $("status").textContent="Comprendiendo página "+n+" de "+pdf.numPages+"…";
+     const pagePct=((n-1)/pdf.numPages)*100;
+     stage("Página",pagePct,"Renderizando página "+n+" de "+pdf.numPages+"…");
+     $("status").textContent="Procesando página "+n+" de "+pdf.numPages+"…";
      const page=await pdf.getPage(n),viewport=page.getViewport({scale:2.2});
      const canvas=document.createElement("canvas");canvas.width=Math.ceil(viewport.width);canvas.height=Math.ceil(viewport.height);
      await page.render({canvasContext:canvas.getContext("2d"),viewport}).promise;
      const blocks=pdfTextBlocks((await page.getTextContent()).items||[],viewport);
-     const result=await analyzePage(canvas,blocks,n);
-     if(!result.providers?.gemini&&!result.providers?.productSearch){throw new Error("No hay motor de visión configurado. Añade GEMINI_API_KEY en las variables de entorno de Vercel.");}
-     used.gemini=used.gemini||Boolean(result.providers?.gemini);
-     used.productSearch=used.productSearch||Boolean(result.providers?.productSearch);
+     stage("Detección",0,"Buscando todos los perfumes individuales de la página "+n+"…");
+     const inferenceStarted=Date.now();
+     const slowTimer=setInterval(()=>slowInference("Analizando página "+n,inferenceStarted),1000);
+     let result;
+     try{result=await analyzePage(canvas,blocks,n)}finally{clearInterval(slowTimer)}
+     stageDone("Detección");
+     if(!result.providers?.gemini&&!result.providers?.productSearch)throw new Error("No hay motor de visión configurado. Añade GEMINI_API_KEY en las variables de entorno de Vercel.");
+     used.gemini=used.gemini||Boolean(result.providers?.gemini);used.productSearch=used.productSearch||Boolean(result.providers?.productSearch);
      const products=result.products||[];
+     stage("Identificación",0,"Se detectaron "+products.length+" posibles perfumes. Validando nombres…");
      const accepted=[];
-     for(const p of products){
+     for(let j=0;j<products.length;j++){
+       const p=products[j];
        if(!p.box||rejectBadBox(p.box,canvas.width,canvas.height))continue;
        if(accepted.some(x=>iou(x.box,p.box)>.55))continue;
        accepted.push(p);
        const src=boxCrop(canvas,p.box);
-       const item={
-         name:normalizeName(p.name)||"Perfume",
-         src,
-         page:n,
-         confidence:Number(p.confidence)||0,
-         method:p.method||"IA",
-         identity:p.identity||null,
-         evidence:p.evidence||"",
-         review:Number(p.confidence||0)<.6||!likelyName(p.name)
-       };
-       if(likelyName(item.name))await enrich(item);
+       const item={name:normalizeName(p.name)||"Perfume",src,page:n,confidence:Number(p.confidence)||0,method:p.method||"IA",identity:p.identity||null,evidence:p.evidence||"",review:Number(p.confidence||0)<.6||!likelyName(p.name)};
+       const idPct=((j+1)/Math.max(1,products.length))*100;
+       stage("Identificación",idPct,"Identificando perfume "+(j+1)+" de "+products.length+"…");
+       if(likelyName(item.name)){
+         const idStarted=Date.now();
+         const t=setInterval(()=>slowInference("Consultando identificación de "+item.name,idStarted),1000);
+         try{await enrich(item)}finally{clearInterval(t)}
+       }
+       stage("Recortes",((j+1)/Math.max(1,products.length))*100,"Recorte individual "+(j+1)+" de "+products.length+"…");
        state.push(item);render();
+       stage("Imágenes",((j+1)/Math.max(1,products.length))*100,"Imagen limpia procesada para "+item.name);
      }
+     stageDone("Identificación");stageDone("Recortes");stageDone("Imágenes");
      if(!products.length)$("status").textContent="Página "+n+": ningún producto individual confirmado.";
+     else $("status").textContent="Página "+n+": "+accepted.length+" perfumes individuales confirmados.";
      setProgress(n/pdf.numPages*100);
+     stage("Página",(n/pdf.numPages)*100,"Página "+n+" de "+pdf.numPages+" completada: "+accepted.length+" perfumes.",n===pdf.numPages);
    }
+   stageDone("Página");stageDone("Detección");
    $("providers").innerHTML='<span class="pill">Gemini '+(used.gemini?"✓":"no configurado")+'</span><span class="pill">Product Search '+(used.productSearch?"✓":"opcional")+'</span><span class="pill">Fragrantica ✓</span><span class="pill">Google Images '+(typeof fetch==="function"?"vía API":"—")+'</span>';
    $("status").textContent=state.length+" productos individuales confirmados. Las páginas completas nunca se usan como producto.";
+   $("stageTitle").textContent="Procesamiento terminado ✓";$("stageDetail").textContent="Tiempo total: "+$("elapsed").textContent+" · "+state.length+" perfumes detectados.";
  }catch(e){
    console.error(e);
    $("status").textContent="No se pudo procesar el PDF: "+(e?.message||"error desconocido");
- }finally{busy=false}
+   $("stageDetail").textContent="Proceso detenido tras "+$("elapsed").textContent+". Revisa el error y vuelve a intentarlo.";
+ }finally{busy=false;clearInterval(progressTimer)}
 }
 window.addEventListener("error",e=>{if(e.message)$("status").textContent="Error: "+e.message});
 </script>
