@@ -76,3 +76,13 @@ Product Search requiere referencias previas del producto. Para perfumes que no e
 ## Desarrollo
 
 La interfaz es estática y puede publicarse en Vercel. Las funciones bajo `/api` se ejecutan en servidor y mantienen las claves de los proveedores fuera del navegador.
+
+
+## Motor local gratuito
+
+Se añadió una versión local independiente del motor de análisis en el paquete **ZUASH Local AI Engine**. Esta versión está diseñada para evitar APIs de pago y combina PyMuPDF, Docling Parse, PaddleOCR-VL 1.6, Qwen3-VL vía Ollama, validación geométrica y DDGS para imágenes.
+
+La arquitectura local está preparada para que la detección no dependa de un único modelo y para que un nombre no genere por sí solo un recorte. Las regiones deben venir de detección visual.
+
+El paquete local incluye una interfaz web, FastAPI, generación del catálogo ZUASH y scripts para Windows/WSL2. Requiere instalar los modelos localmente.
+
