@@ -168,7 +168,7 @@ $("search").onclick=()=>state.forEach((p,i)=>{
 });
 $("pdf").onclick=()=>{
  if(!state.length){$("status").textContent="Primero carga un PDF.";return}
- const doc=new jsPDF({unit:"mm",format:"a4"}),W=210,H=297,M=10,G=5,C=2,R=4,cw=(W-2*M-G)/C,ch=(H-2*M-G*3)/R;
+ const doc=new jsPDF({unit:"mm",format:"a4"}),W=210,H=297,M=10,G=5,C=2,R=4,top=22,cw=(W-2*M-G)/C,ch=(H-top-M-G*3)/R;
  state.forEach((p,i)=>{
   if(i&&i%8===0)doc.addPage();
   if(i%8===0){
@@ -176,7 +176,7 @@ $("pdf").onclick=()=>{
    doc.setTextColor(225,194,82);doc.setFont("helvetica","bold");doc.setFontSize(19);doc.text("ZUASH",W/2,13,{align:"center"});
    doc.setDrawColor(120,95,25);doc.line(M,17,W-M,17);
   }
-  const k=i%8,x=M+(k%2)*(cw+G),y=22+Math.floor(k/2)*(ch+G);
+  const k=i%8,x=M+(k%2)*(cw+G),y=top+Math.floor(k/2)*(ch+G);
   doc.setFillColor(15,15,15);doc.roundedRect(x,y,cw,ch,3,3,"F");
   doc.setDrawColor(48,48,48);doc.roundedRect(x,y,cw,ch,3,3,"S");
   try{doc.addImage(p.src,p.src.startsWith("data:image/png")?"PNG":"JPEG",x+4,y+5,cw-8,ch-23,undefined,"FAST")}catch(e){console.warn(e)}
