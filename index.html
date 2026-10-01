@@ -294,4 +294,35 @@ async function readPdf(file){
   $("status").textContent=state.length+" perfumes separados. Se usó primero el nombre que aparece encima de cada producto; la IA visual queda como respaldo.";
  }catch(err){console.error(err);$("status").textContent="No se pudo procesar el PDF: "+(err.message||"error desconocido")}
 }
->
+
+function render(){
+ $("grid").innerHTML="";
+ state.forEach((p,i)=>{
+  const d=document.createElement("article");d.className="card"+(p.confidence==="revisar"?" review":"");
+  d.innerHTML='<span class="tag">'+esc(p.kind)+(p.fragrantica?' · Fragrantica ✓':' · revisar')+'</span><div class="pic"><img src="'+p.src+'" alt=""></div><div class="body"><input value="'+esc(p.name)+'"><div class="ml">'+(typeof p.confidence==="number"?"Detección IA: "+Math.round(p.confidence*100)+"%":"Identificación por texto")+'</div><div class="actions"><button class="alt find">Imagen limpia</button><button class="alt frag">Fragrantica</button><button class="alt del">Eliminar</button></div></div>';
+  d.querySelector("input").oninput=e=>p.name=e.target.value;
+  d.querySelector(".find").onclick=async()=>{const ok=await applyFragrantica(p);if(!ok)window.open("https://www.google.com/search?tbm=isch&q="+encodeURIComponent(p.name+" perfume bottle"),"_blank");render()};
+  d.querySelector(".frag").onclick=async()=>{const ok=await applyFragrantica(p);if(!ok)window.open("https://www.google.com/search?q="+encodeURIComponent("site:fragrantica.com/perfume "+p.name),"_blank");render()};
+  d.querySelector(".del").onclick=()=>{state.splice(i,1);render()};
+  $("grid").appendChild(d);
+ });
+}
+$("add").onclick=()=>{state.push({name:"Nuevo perfume",src:"data:image/svg+xml;charset=utf8,"+encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="500" height="500"><rect width="100%" height="100%" fill="#050505"/><text x="50%" y="50%" fill="#d9b84a" text-anchor="middle" font-size="30">ZUASH</text></svg>'),kind:"manual",confidence:"revisar"});render()};
+$("search").onclick=async()=>{for(const p of state){if(!p.fragrantica)await applyFragrantica(p)}render()};
+$("pdf").onclick=()=>{
+ if(!state.length){$("status").textContent="Primero carga un PDF.";return}
+ const doc=new jsPDF({unit:"mm",format:"a4"}),W=210,H=297,M=10,G=5,C=2,R=4,top=22,cw=(W-2*M-G)/C,ch=(H-top-M-G*3)/R;
+ state.forEach((p,i)=>{
+  if(i&&i%8===0)doc.addPage();
+  if(i%8===0){doc.setFillColor(7,7,7);doc.rect(0,0,W,H,"F");doc.setTextColor(225,194,82);doc.setFont("helvetica","bold");doc.setFontSize(19);doc.text("ZUASH",W/2,13,{align:"center"});doc.setDrawColor(120,95,25);doc.line(M,17,W-M,17)}
+  const k=i%8,x=M+(k%2)*(cw+G),y=top+Math.floor(k/2)*(ch+G);
+  doc.setFillColor(15,15,15);doc.roundedRect(x,y,cw,ch,3,3,"F");doc.setDrawColor(48,48,48);doc.roundedRect(x,y,cw,ch,3,3,"S");
+  try{doc.addImage(p.src,p.src.startsWith("data:image/png")?"PNG":"JPEG",x+4,y+5,cw-8,ch-23,undefined,"FAST")}catch(e){}
+  doc.setTextColor(225,194,82);doc.setFontSize(10);doc.text(p.name||"Perfume",x+cw/2,y+ch-8,{align:"center",maxWidth:cw-8});
+ });
+ doc.save("Catalogo-ZUASH.pdf");$("status").textContent="Catálogo generado correctamente.";
+};
+window.addEventListener("error",e=>{if(e.message)$("status").textContent="Error: "+e.message});
+</script>
+</body>
+</html>
