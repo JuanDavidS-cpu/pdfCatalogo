@@ -193,7 +193,7 @@ async function readPdf(file){
      const accepted=[];
      for(const p of products){
        if(!p.box||rejectBadBox(p.box,canvas.width,canvas.height))continue;
-       if(accepted.some(x=>iou(x,p)>.55))continue;
+       if(accepted.some(x=>iou(x.box,p.box)>.55))continue;
        accepted.push(p);
        const src=boxCrop(canvas,p.box);
        const item={
