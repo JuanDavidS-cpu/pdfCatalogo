@@ -137,10 +137,75 @@ async function applyFragrantica(p){
  return false;
 }
 
+function groupTextLines(blocks){
+ const sorted=[...blocks].sort((a,b)=>(a.y-b.y)||(a.x-b.x));
+ const lines=[];
+ for(const b of sorted){
+  let line=lines.find(l=>Math.abs(l.y-b.y)<Math.max(10,b.h*.65));
+  if(!line){line={y:b.y,h:b.h,items:[]};lines.push(line)}
+  line.items.push(b);line.y=Math.min(line.y,b.y);line.h=Math.max(line.h,b.h);
+ }
+ return lines.map(l=>{
+  l.items.sort((a,b)=>a.x-b.x);
+  return {x:l.items[0].x,y:l.y,w:(l.items[l.items.length-1].x+l.items[l.items.length-1].w)-l.items[0].x,h:l.h,text:cleanText(l.items.map(x=>x.text).join(" "))};
+ }).sort((a,b)=>(a.y-b.y)||(a.x-b.x));
+}
+
+function isSupplierJunk(s){
+ const t=cleanText(s).toLowerCase();
+ return !t || t.length<3 ||
+  /(^|\s)@\w+/.test(t) || /instagram|whatsapp|facebook|tiktok|telegram|http|www\.|\.com\b|\.co\b|proveedor|distribuidor|contacto|pedido|cat[aá]logo|mayorista|venta(s)?|env[ií]os?|domicilio/.test(t) ||
+  /^\+?\d[\d\s().-]{5,}$/.test(t) || /^\d+[\s./-]*$/.test(t) ||
+  /\b\d{6,}\b/.test(t) || /^\d+\s*(ml|oz)?$/i.test(t);
+}
+
+function isLikelyPerfumeName(s){
+ if(isSupplierJunk(s))return false;
+ const t=cleanText(s);
+ if(t.length>70 || /^[\d\W]+$/.test(t))return false;
+ const words=t.split(/\s+/);
+ if(words.length>12)return false;
+ const letters=(t.match(/[A-Za-zÁÉÍÓÚÜÑáéíóúüñ]/g)||[]).length;
+ if(letters<3)return false;
+ if(/^(perfume|fragancia|fragrance|men|women|hombre|mujer|unisex|original|nuevo|oferta|precio|ml|oz)$/i.test(t))return false;
+ return true;
+}
+
+function productBoxesFromNames(blocks,pageW,pageH){
+ const lines=groupTextLines(blocks).filter(l=>isLikelyPerfumeName(l.text));
+ if(!lines.length)return [];
+ // Names are above their bottle. Treat every plausible name as an anchor.
+ // Build row clusters so columns are separated by the midpoint between names.
+ const rows=[];
+ for(const l of lines){
+  let row=rows.find(r=>Math.abs(r.y-l.y)<Math.max(28,l.h*1.8));
+  if(!row){row={y:l.y,h:l.h,items:[]};rows.push(row)}
+  row.items.push(l);row.y=Math.min(row.y,l.y);row.h=Math.max(row.h,l.h);
+ }
+ const boxes=[];
+ for(let ri=0;ri<rows.length;ri++){
+  const row=rows[ri];row.items.sort((a,b)=>a.x-b.x);
+  const nextRow=rows[ri+1];
+  for(let i=0;i<row.items.length;i++){
+   const name=row.items[i];
+   const prev=row.items[i-1],next=row.items[i+1];
+   const left=prev ? (prev.x+prev.w/2+name.x+name.w/2)/2 : Math.max(0,name.x-name.w*.7);
+   const right=next ? (name.x+name.w/2+next.x+next.w/2)/2 : Math.min(pageW,name.x+name.w+name.w*.7);
+   const top=Math.min(pageH,name.y+name.h+4);
+   const bottom=nextRow ? Math.max(top,nextRow.y-8) : pageH-6;
+   if(right-left>45 && bottom-top>45) boxes.push({x:left,y:top,w:right-left,h:bottom-top,text:name.text,score:1,label:"name-anchor"});
+  }
+ }
+ return dedupeBoxes(boxes).sort((a,b)=>(a.y-b.y)||(a.x-b.x));
+}
+
 async function extractEmbeddedImages(page){
  const out=[];
  try{
   const op=await page.getOperatorList();
+  // Keep image extraction only as a secondary signal. The PDF page layout/name
+  // anchors are more reliable for supplier sheets where one raster can contain
+  // several bottles.
   for(let i=0;i<op.fnArray.length;i++){
    const fn=op.fnArray[i],args=op.argsArray[i];
    if(fn!==pdfjsLib.OPS.paintImageXObject&&fn!==pdfjsLib.OPS.paintJpegXObject)continue;
@@ -194,70 +259,39 @@ async function readPdf(file){
  $("status").textContent="Abriendo PDF…";
  try{
   const pdf=await pdfjsLib.getDocument({data:await file.arrayBuffer()}).promise;
-  const model=await getVisionModel();
   for(let n=1;n<=pdf.numPages;n++){
    $("status").textContent="Analizando página "+n+" de "+pdf.numPages+"…";
-   const page=await pdf.getPage(n),view=page.getViewport({scale:2.4});
+   const page=await pdf.getPage(n),scale=2.4,view=page.getViewport({scale});
    const c=document.createElement("canvas");c.width=Math.ceil(view.width);c.height=Math.ceil(view.height);
    await page.render({canvasContext:c.getContext("2d"),viewport:view}).promise;
-   const text=await page.getTextContent(),blocks=textBlocks(text.items||[],2.4,c.height);
-   const embedded=await extractEmbeddedImages(page);
-   let products=[];
-   // If the PDF contains separate image objects, use them first.
-   if(embedded.length>1){
-    products=embedded.map((src,i)=>({name:i===0?nameFromText(text.items||[]):"Perfume",src,kind:"imagen PDF",confidence:"estructura"}));
-   }else{
-    // If the page is a single raster/composite, use ML object detection.
-    const boxes=await detectIndividualProducts(c,blocks);
-    for(let i=0;i<boxes.length;i++){
-     const b=boxes[i],crop=cropCanvas(c,b),src=await trimProductImage(crop.toDataURL("image/png"));
-     products.push({name:b.text||"Perfume",src,kind:"IA visual",confidence:b.score,imageBox:b});
-    }
+   const text=await page.getTextContent(),blocks=textBlocks(text.items||[],scale,c.height);
+   let boxes=productBoxesFromNames(blocks,c.width,c.height);
+
+   // Primary path: use the supplier's own perfume names as anchors. This is
+   // intentionally preferred over generic object detection because the name
+   // is printed immediately above each product in these sheets.
+   if(!boxes.length){
+    const model=await getVisionModel();
+    const detections=await model.detect(c,100,0.12);
+    boxes=dedupeBoxes(detections.filter(d=>d.class==="bottle"&&d.score>=0.12).map(d=>({x:d.bbox[0],y:d.bbox[1],w:d.bbox[2],h:d.bbox[3],score:d.score,label:d.class,text:""})));
    }
-   // Never use the entire supplier page as a product.
-   if(!products.length){
-    $("status").textContent="Página "+n+": no se detectaron perfumes individualmente. Se omite para evitar meter la marca/Instagram del proveedor.";
+
+   if(!boxes.length){
+    $("status").textContent="Página "+n+": no se pudieron separar productos. Se omite la página completa.";
     continue;
    }
-   for(const p of products){
+
+   for(const b of boxes){
+    // Name comes from the anchor above the image, never from arbitrary page text.
+    const crop=cropCanvas(c,b,0.035);
+    const src=await trimProductImage(crop.toDataURL("image/png"));
+    const p={name:cleanText(b.text)||"Perfume",src,kind:b.label==="name-anchor"?"nombre + región":"IA visual",confidence:b.score||"revisar",imageBox:b};
     await applyFragrantica(p);
-    state.push(p);
-    render();
+    if(!isLikelyPerfumeName(p.name))p.name=cleanText(b.text)||"Perfume";
+    state.push(p);render();
    }
   }
-  $("status").textContent=state.length+" perfumes detectados. La IA separa productos; Fragrantica intenta resolver el nombre y la imagen limpia.";
+  $("status").textContent=state.length+" perfumes separados. Se usó primero el nombre que aparece encima de cada producto; la IA visual queda como respaldo.";
  }catch(err){console.error(err);$("status").textContent="No se pudo procesar el PDF: "+(err.message||"error desconocido")}
 }
-
-function render(){
- $("grid").innerHTML="";
- state.forEach((p,i)=>{
-  const d=document.createElement("article");d.className="card"+(p.confidence==="revisar"?" review":"");
-  d.innerHTML='<span class="tag">'+esc(p.kind)+(p.fragrantica?' · Fragrantica ✓':' · revisar')+'</span><div class="pic"><img src="'+p.src+'" alt=""></div><div class="body"><input value="'+esc(p.name)+'"><div class="ml">'+(typeof p.confidence==="number"?"Detección IA: "+Math.round(p.confidence*100)+"%":"Identificación por texto")+'</div><div class="actions"><button class="alt find">Imagen limpia</button><button class="alt frag">Fragrantica</button><button class="alt del">Eliminar</button></div></div>';
-  d.querySelector("input").oninput=e=>p.name=e.target.value;
-  d.querySelector(".find").onclick=async()=>{const ok=await applyFragrantica(p);if(!ok)window.open("https://www.google.com/search?tbm=isch&q="+encodeURIComponent(p.name+" perfume bottle"),"_blank");render()};
-  d.querySelector(".frag").onclick=async()=>{const ok=await applyFragrantica(p);if(!ok)window.open("https://www.google.com/search?q="+encodeURIComponent("site:fragrantica.com/perfume "+p.name),"_blank");render()};
-  d.querySelector(".del").onclick=()=>{state.splice(i,1);render()};
-  $("grid").appendChild(d);
- });
-}
-
-$("add").onclick=()=>{state.push({name:"Nuevo perfume",src:"data:image/svg+xml;charset=utf8,"+encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="500" height="500"><rect width="100%" height="100%" fill="#050505"/><text x="50%" y="50%" fill="#d9b84a" text-anchor="middle" font-size="30">ZUASH</text></svg>'),kind:"manual",confidence:"revisar"});render()};
-$("search").onclick=async()=>{for(const p of state){if(!p.fragrantica)await applyFragrantica(p)}render()};
-$("pdf").onclick=()=>{
- if(!state.length){$("status").textContent="Primero carga un PDF.";return}
- const doc=new jsPDF({unit:"mm",format:"a4"}),W=210,H=297,M=10,G=5,C=2,R=4,top=22,cw=(W-2*M-G)/C,ch=(H-top-M-G*3)/R;
- state.forEach((p,i)=>{
-  if(i&&i%8===0)doc.addPage();
-  if(i%8===0){doc.setFillColor(7,7,7);doc.rect(0,0,W,H,"F");doc.setTextColor(225,194,82);doc.setFont("helvetica","bold");doc.setFontSize(19);doc.text("ZUASH",W/2,13,{align:"center"});doc.setDrawColor(120,95,25);doc.line(M,17,W-M,17)}
-  const k=i%8,x=M+(k%2)*(cw+G),y=top+Math.floor(k/2)*(ch+G);
-  doc.setFillColor(15,15,15);doc.roundedRect(x,y,cw,ch,3,3,"F");doc.setDrawColor(48,48,48);doc.roundedRect(x,y,cw,ch,3,3,"S");
-  try{doc.addImage(p.src,p.src.startsWith("data:image/png")?"PNG":"JPEG",x+4,y+5,cw-8,ch-23,undefined,"FAST")}catch(e){}
-  doc.setTextColor(225,194,82);doc.setFontSize(10);doc.text(p.name||"Perfume",x+cw/2,y+ch-8,{align:"center",maxWidth:cw-8});
- });
- doc.save("Catalogo-ZUASH.pdf");$("status").textContent="Catálogo generado correctamente.";
-};
-window.addEventListener("error",e=>{if(e.message)$("status").textContent="Error: "+e.message});
-</script>
-</body>
-</html>
+>
