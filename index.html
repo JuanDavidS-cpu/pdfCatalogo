@@ -222,12 +222,22 @@ async function enrich(p){
  const q=normalizeName(p.name);if(!likelyName(q))return false;
  const frag=await identify(q);
  if(frag?.name){
-   p.name=frag.name;p.fragrantica=frag.url||null;p.identity="Fragrantica";p.confidence=Math.max(Number(p.confidence)||0,.92);
-   if(frag.image)p.src=frag.image;
+   p.name=frag.name;
+   p.fragrantica=frag.url||null;
+   p.identity="Fragrantica";
+   p.confidence=Math.max(Number(p.confidence)||0,.92);
  }
- if(!p.fragrantica||!p.src||p.src.startsWith("data:")){
-   const img=await imageSearch(p.name);
-   if(img?.image){p.src=img.image;p.imageSource=img.source||"Google Images";p.imageUrl=img.url||null}
+ // Google Images is the preferred clean-image source. Fragrantica is the
+ // identity/name source and the fallback image source when Google is unavailable.
+ const img=await imageSearch(p.name);
+ if(img?.image){
+   p.src=img.image;
+   p.imageSource=img.source||"Google Images";
+   p.imageUrl=img.url||null;
+ }else if(frag?.image){
+   p.src=frag.image;
+   p.imageSource="Fragrantica";
+   p.imageUrl=frag.url||null;
  }
  return true;
 }
