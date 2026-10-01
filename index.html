@@ -9,70 +9,142 @@
 <label class="drop"><b>Arrastra el PDF aquí o haz clic para seleccionarlo</b><br><small>El procesamiento se realiza localmente en tu navegador.</small><input id="file" type="file" accept="application/pdf" hidden></label>
 <div id="tools" class="tools hide"><button id="add">＋ Añadir</button><button id="search" class="alt">🔎 Buscar imágenes faltantes</button><span class="grow"></span><button id="pdf">Generar catálogo PDF</button></div>
 <div id="status" class="status"></div><div id="grid" class="grid"></div></main>
-<script type="module">
-import * as pdfjs from "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.4.168/pdf.min.mjs";
-import {jsPDF} from "https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.es.min.js";
-pdfjs.GlobalWorkerOptions.workerSrc="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.4.168/pdf.worker.min.mjs";
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+<script>
+pdfjsLib.GlobalWorkerOptions.workerSrc="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
+const { jsPDF } = window.jspdf;
 const $=id=>document.getElementById(id),state=[];
-$("file").onchange=e=>readPdf(e.target.files[0]);
-document.querySelector(".drop").ondragover=e=>e.preventDefault();
-document.querySelector(".drop").ondrop=e=>{e.preventDefault();readPdf(e.dataTransfer.files[0])};
+const fileInput=$("file"), drop=document.querySelector(".drop");
+
+fileInput.addEventListener("change",e=>{
+ const file=e.target.files&&e.target.files[0];
+ if(file) readPdf(file);
+});
+drop.addEventListener("dragover",e=>{e.preventDefault();drop.style.borderColor="#e2c65b"});
+drop.addEventListener("dragleave",()=>drop.style.borderColor="");
+drop.addEventListener("drop",e=>{
+ e.preventDefault();drop.style.borderColor="";
+ const file=e.dataTransfer.files&&e.dataTransfer.files[0];
+ if(file) readPdf(file);
+});
 
 function nameFromText(items){
  const bad=/^(ml|oz|eau de parfum|eau de toilette|parfum|perfume|hombre|mujer|men|women|masculino|femenino|original|unisex)$/i;
- let a=items.map(x=>x.str.replace(/\s+/g," ").trim()).filter(x=>x.length>2&&!bad.test(x)&&!/^\d+$/.test(x));
+ const a=items.map(x=>(x.str||"").replace(/\s+/g," ").trim()).filter(x=>x.length>2&&!bad.test(x)&&!/^[\d\W]+$/.test(x));
  return a.sort((x,y)=>y.length-x.length)[0]||"Perfume";
 }
+
 async function readPdf(file){
  if(!file)return;
- state.length=0;$("tools").classList.remove("hide");$("status").textContent="Analizando PDF…";
- const pdf=await pdfjs.getDocument({data:await file.arrayBuffer()}).promise;
- for(let n=1;n<=pdf.numPages;n++){
-  const page=await pdf.getPage(n),view=page.getViewport({scale:2}),c=document.createElement("canvas");c.width=view.width;c.height=view.height;
-  await page.render({canvasContext:c.getContext("2d"),viewport:view}).promise;
-  const text=await page.getTextContent(),items=text.items;
-  let images=[];
-  try{
-   const op=await page.getOperatorList();
-   for(let i=0;i<op.fnArray.length;i++){
-    const fn=op.fnArray[i],a=op.argsArray[i];
-    if(fn===pdfjs.OPS.paintImageXObject||fn===pdfjs.OPS.paintJpegXObject){
-     const o=page.objs.get(a[0]);
-     if(o&&o.width&&o.height){const q=document.createElement("canvas");q.width=o.width;q.height=o.height;q.getContext("2d").drawImage(o,0,0);images.push(q.toDataURL("image/png"))}
-    }
-   }
-  }catch(e){}
-  if(images.length){
-   images.forEach((src,i)=>state.push({name:i===0?nameFromText(items):"Perfume "+(i+1),src,kind:"extraída"}));
-  }else{
-   state.push({name:nameFromText(items),src:c.toDataURL("image/jpeg",.9),kind:"página"});
-  }
-  $("status").textContent="Página "+n+" de "+pdf.numPages+" procesada…";
+ if(file.type!=="application/pdf" && !file.name.toLowerCase().endsWith(".pdf")){
+  $("status").textContent="Selecciona un archivo PDF válido."; return;
  }
- render();$("status").textContent=state.length+" perfumes detectados. Puedes corregir nombres o buscar imágenes faltantes.";
+ state.length=0;
+ $("tools").classList.remove("hide");
+ $("grid").innerHTML="";
+ $("status").textContent="Abriendo PDF…";
+ try{
+  const buffer=await file.arrayBuffer();
+  const pdf=await pdfjsLib.getDocument({data:buffer}).promise;
+  for(let n=1;n<=pdf.numPages;n++){
+   $("status").textContent="Procesando página "+n+" de "+pdf.numPages+"…";
+   const page=await pdf.getPage(n);
+   const view=page.getViewport({scale:2});
+   const c=document.createElement("canvas");
+   c.width=Math.ceil(view.width); c.height=Math.ceil(view.height);
+   const ctx=c.getContext("2d");
+   await page.render({canvasContext:ctx,viewport:view}).promise;
+   const text=await page.getTextContent();
+   const items=text.items||[];
+   let images=[];
+   try{
+    const op=await page.getOperatorList();
+    for(let i=0;i<op.fnArray.length;i++){
+     const fn=op.fnArray[i],args=op.argsArray[i];
+     if(fn===pdfjsLib.OPS.paintImageXObject || fn===pdfjsLib.OPS.paintJpegXObject){
+      const key=args[0];
+      const obj=await new Promise(resolve=>{
+       let tries=0;
+       const check=()=>{
+        const value=page.objs.get(key);
+        if(value) resolve(value);
+        else if(++tries<30) setTimeout(check,30);
+        else resolve(null);
+       };
+       check();
+      });
+      if(obj && obj.width && obj.height){
+       const q=document.createElement("canvas");
+       q.width=obj.width;q.height=obj.height;
+       const qctx=q.getContext("2d");
+       qctx.drawImage(obj,0,0);
+       images.push(q.toDataURL("image/png"));
+      }
+     }
+    }
+   }catch(err){console.warn("No se pudieron extraer imágenes individuales:",err)}
+   if(images.length){
+    images.forEach((src,i)=>state.push({
+     name:i===0?nameFromText(items):"Perfume "+(i+1),
+     src,kind:"extraída"
+    }));
+   }else{
+    state.push({
+     name:nameFromText(items),
+     src:c.toDataURL("image/jpeg",.9),
+     kind:"página"
+    });
+   }
+   render();
+  }
+  $("status").textContent=state.length+" perfumes detectados. Puedes corregir nombres o buscar imágenes faltantes.";
+ }catch(err){
+  console.error(err);
+  $("status").textContent="No se pudo leer el PDF: "+(err.message||"error desconocido");
+ }
 }
+
 function render(){
  $("grid").innerHTML="";
  state.forEach((p,i)=>{
   const d=document.createElement("article");d.className="card";
-  d.innerHTML='<span class="tag">'+p.kind+'</span><div class="pic"><img src="'+p.src+'"></div><div class="body"><input value="'+esc(p.name)+'"><div class="actions"><button class="alt find">Buscar imagen</button><button class="alt del">Eliminar</button></div></div>';
+  d.innerHTML='<span class="tag">'+p.kind+'</span><div class="pic"><img src="'+p.src+'" alt=""></div><div class="body"><input value="'+esc(p.name)+'"><div class="actions"><button class="alt find">Buscar imagen</button><button class="alt del">Eliminar</button></div></div>';
   d.querySelector("input").oninput=e=>p.name=e.target.value;
   d.querySelector(".find").onclick=()=>window.open("https://www.google.com/search?tbm=isch&q="+encodeURIComponent(p.name+" perfume bottle"),"_blank");
   d.querySelector(".del").onclick=()=>{state.splice(i,1);render()};
   $("grid").appendChild(d);
  });
 }
-function esc(s){return s.replaceAll("&","&amp;").replaceAll('"',"&quot;").replaceAll("<","&lt;")}
-$("add").onclick=()=>{state.push({name:"Nuevo perfume",src:"data:image/svg+xml;charset=utf8,"+encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="500" height="500"><rect width="100%" height="100%" fill="#050505"/><text x="50%" y="50%" fill="#d9b84a" text-anchor="middle" font-size="30">ZUASH</text></svg>'),kind:"manual"});render()};
-$("search").onclick=()=>state.forEach((p,i)=>{if(p.kind!=="extraída")setTimeout(()=>window.open("https://www.google.com/search?tbm=isch&q="+encodeURIComponent(p.name+" perfume bottle"),"_blank"),i*250)});
+function esc(s){return String(s).replaceAll("&","&amp;").replaceAll('"',"&quot;").replaceAll("<","&lt;")}
+
+$("add").onclick=()=>{
+ state.push({name:"Nuevo perfume",src:"data:image/svg+xml;charset=utf8,"+encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="500" height="500"><rect width="100%" height="100%" fill="#050505"/><text x="50%" y="50%" fill="#d9b84a" text-anchor="middle" font-size="30">ZUASH</text></svg>'),kind:"manual"});
+ render();
+};
+$("search").onclick=()=>state.forEach((p,i)=>{
+ if(p.kind!=="extraída") setTimeout(()=>window.open("https://www.google.com/search?tbm=isch&q="+encodeURIComponent(p.name+" perfume bottle"),"_blank"),i*250);
+});
 $("pdf").onclick=()=>{
+ if(!state.length){$("status").textContent="Primero carga un PDF.";return}
  const doc=new jsPDF({unit:"mm",format:"a4"}),W=210,H=297,M=13,G=7,C=2,R=3,cw=(W-2*M-G)/C,ch=(H-2*M-G*2)/R;
  state.forEach((p,i)=>{
-  if(i){if(i%6===0)doc.addPage()}if(i%6===0){doc.setFillColor(7,7,7);doc.rect(0,0,W,H,"F");doc.setTextColor(225,194,82);doc.setFont("helvetica","bold");doc.setFontSize(19);doc.text("ZUASH",W/2,13,{align:"center"});doc.setDrawColor(120,95,25);doc.line(M,17,W-M,17)}
-  const k=i%6,x=M+(k%2)*(cw+G),y=23+Math.floor(k/2)*(ch+G);doc.setFillColor(15,15,15);doc.roundedRect(x,y,cw,ch,3,3,"F");doc.setDrawColor(48,48,48);doc.roundedRect(x,y,cw,ch,3,3,"S");
-  try{doc.addImage(p.src,p.src.startsWith("data:image/png")?"PNG":"JPEG",x+4,y+5,cw-8,ch-23,undefined,"FAST")}catch(e){}
+  if(i&&i%6===0)doc.addPage();
+  if(i%6===0){
+   doc.setFillColor(7,7,7);doc.rect(0,0,W,H,"F");
+   doc.setTextColor(225,194,82);doc.setFont("helvetica","bold");doc.setFontSize(19);doc.text("ZUASH",W/2,13,{align:"center"});
+   doc.setDrawColor(120,95,25);doc.line(M,17,W-M,17);
+  }
+  const k=i%6,x=M+(k%2)*(cw+G),y=23+Math.floor(k/2)*(ch+G);
+  doc.setFillColor(15,15,15);doc.roundedRect(x,y,cw,ch,3,3,"F");
+  doc.setDrawColor(48,48,48);doc.roundedRect(x,y,cw,ch,3,3,"S");
+  try{doc.addImage(p.src,p.src.startsWith("data:image/png")?"PNG":"JPEG",x+4,y+5,cw-8,ch-23,undefined,"FAST")}catch(e){console.warn(e)}
   doc.setTextColor(225,194,82);doc.setFontSize(10);doc.text(p.name||"Perfume",x+cw/2,y+ch-8,{align:"center",maxWidth:cw-8});
  });
- doc.save("Catalogo-ZUASH.pdf");$("status").textContent="Catálogo generado correctamente.";
+ doc.save("Catalogo-ZUASH.pdf");
+ $("status").textContent="Catálogo generado correctamente.";
 };
+window.addEventListener("error",e=>{
+ if(e.message) $("status").textContent="Error de la aplicación: "+e.message;
+});
 </script></body></html>
