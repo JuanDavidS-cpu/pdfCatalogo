@@ -16,29 +16,27 @@ button.alt{background:#161616;color:#eee;border-color:#444}.grid{display:grid;gr
 .card{background:#101010;border:1px solid #292929;border-radius:14px;overflow:hidden;position:relative}.pic{height:255px;display:flex;align-items:center;justify-content:center;padding:12px;background:#050505}
 .pic img{max-width:100%;max-height:100%;object-fit:contain}.body{padding:12px}.body input{width:100%;padding:10px;background:#181818;border:1px solid #3a3a3a;border-radius:7px;color:#fff;font-weight:700}
 .actions{display:flex;gap:6px;margin-top:8px}.actions button{flex:1;font-size:11px}.tag{position:absolute;top:8px;left:8px;background:#000d;border:1px solid #6d591d;color:#e3c75d;border-radius:20px;padding:4px 7px;font-size:10px;z-index:2}
-.status{color:#999;font-size:13px;margin:12px 0}.hide{display:none}.ml{color:#bca866;font-size:12px;margin-top:5px}.review{border-color:#8b5b20}
+.status{color:#999;font-size:13px;margin:12px 0}.hide{display:none}.meta{color:#777;font-size:11px;line-height:1.45;margin-top:5px}.review{border-color:#8b5b20}
 .progress{height:5px;background:#191919;border-radius:5px;overflow:hidden;margin-top:8px}.progress i{display:block;height:100%;width:0;background:#d9b84a;transition:width .2s}
+.pill{display:inline-block;padding:4px 8px;border-radius:999px;background:#151515;border:1px solid #2b2b2b;color:#aaa;font-size:11px;margin:3px 3px 0 0}
 </style>
 </head>
 <body>
-<header><div class="logo">ZUASH</div><small>PREMIUM FRAGRANCE CATALOG STUDIO · IA VISUAL</small></header>
+<header><div class="logo">ZUASH</div><small>PREMIUM FRAGRANCE CATALOG STUDIO · HYBRID AI</small></header>
 <main>
 <h1>Generador de catálogo</h1>
-<div class="sub">PDF de proveedor → separación individual → nombre → imagen limpia → catálogo ZUASH</div>
-<label class="drop"><b>Arrastra el PDF aquí o haz clic para seleccionarlo</b><br><small>No se usará nunca la página completa como producto.</small><input id="file" type="file" accept="application/pdf" hidden></label>
-<div id="tools" class="tools hide"><button id="add">＋ Añadir</button><button id="search" class="alt">🔎 Completar imágenes</button><span class="grow"></span><button id="pdf">Generar catálogo PDF</button></div>
-<div id="status" class="status"></div><div class="progress"><i id="bar"></i></div><div id="grid" class="grid"></div>
+<div class="sub">PDF → comprensión visual → detección individual → identificación → imagen limpia → catálogo</div>
+<label class="drop"><b>Arrastra cualquier PDF aquí o haz clic para seleccionarlo</b><br><small>El sistema analiza cada página de forma independiente y nunca convierte una página completa en un producto.</small><input id="file" type="file" accept="application/pdf" hidden></label>
+<div id="tools" class="tools hide"><button id="add">＋ Añadir</button><button id="search" class="alt">🔎 Reintentar imágenes</button><span class="grow"></span><button id="pdf">Generar catálogo PDF</button></div>
+<div id="status" class="status"></div><div id="providers"></div><div class="progress"><i id="bar"></i></div><div id="grid" class="grid"></div>
 </main>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.22.0/dist/tf.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd"></script>
-<script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
 <script>
 pdfjsLib.GlobalWorkerOptions.workerSrc="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
-const {jsPDF}=window.jspdf,$=id=>document.getElementById(id),state=[];
+const {jsPDF}=window.jspdf,$=id=>document.getElementById(id);
+const state=[];let busy=false;
 const API="/api";
-let visionModel=null,ocrWorker=null,busy=false;
 
 $("file").addEventListener("change",e=>{const f=e.target.files?.[0];if(f)readPdf(f)});
 const drop=document.querySelector(".drop");
@@ -55,20 +53,25 @@ function normalizeName(s){
  t=t.replace(/^\s*[#№]?\s*\d{1,4}[\s.):-]+/,"");
  t=t.replace(/\s+(@\w+|instagram\s*:\s*\S+|ig\s*:\s*\S+)$/i,"");
  t=t.replace(/\s+(\d+(?:\.\d+)?\s*(?:ml|oz))\s*$/i,"");
- t=t.replace(/\s{2,}/g," ").trim();
- return t;
-}
-function junk(s){
- const t=clean(s).toLowerCase();
- return !t||t.length<3||/(^|\s)@\w+/.test(t)||/instagram|whatsapp|facebook|tiktok|telegram|https?:|www\.|\.com\b|\.co\b|proveedor|distribuidor|contacto|pedido|cat[aá]logo|mayorista|env[ií]os?|domicilio/.test(t)||
- /^\+?\d[\d\s().-]{5,}$/.test(t)||/^\d+[\s./-]*$/.test(t)||/\b\d{6,}\b/.test(t);
+ return t.trim();
 }
 function likelyName(s){
- const t=normalizeName(s);if(junk(t)||t.length>70||/^[\d\W]+$/.test(t))return false;
- const words=t.split(/\s+/);if(words.length>10)return false;
- const letters=(t.match(/[A-Za-zÁÉÍÓÚÜÑáéíóúüñ]/g)||[]).length;if(letters<3)return false;
- if(/^(perfume|fragancia|fragrance|men|women|hombre|mujer|unisex|original|nuevo|oferta|precio|ml|oz|edp|edt)$/i.test(t))return false;
- return true;
+ const t=normalizeName(s);
+ if(!t||t.length>100)return false;
+ return /[A-Za-zÁÉÍÓÚÜÑáéíóúüñ]{3}/.test(t)&&!/^(perfume|fragancia|fragrance)$/i.test(t);
+}
+
+function groupTextLines(blocks){
+ const lines=[];
+ for(const b of [...blocks].sort((a,b)=>a.y-b.y||a.x-b.x)){
+   let line=lines.find(l=>Math.abs(l.y-b.y)<Math.max(7,b.h*.75));
+   if(!line){line={y:b.y,h:b.h,items:[]};lines.push(line)}
+   line.items.push(b);line.h=Math.max(line.h,b.h);line.y=Math.min(line.y,b.y);
+ }
+ return lines.map(l=>{
+   l.items.sort((a,b)=>a.x-b.x);
+   return {x:l.items[0].x,y:l.y,w:l.items.at(-1).x+l.items.at(-1).w-l.items[0].x,h:l.h,text:clean(l.items.map(x=>x.text).join(" "))};
+ }).sort((a,b)=>a.y-b.y||a.x-b.x);
 }
 
 function pdfTextBlocks(items,viewport){
@@ -77,177 +80,70 @@ function pdfTextBlocks(items,viewport){
    const p=viewport.convertToViewportPoint(tr[4],tr[5]);
    const p2=viewport.convertToViewportPoint(tr[4]+(it.width||0),tr[5]);
    const fs=Math.max(7,Math.hypot(tr[0],tr[1])||Math.abs(tr[3])||10);
-   const x=Math.min(p[0],p2[0]),w=Math.max(3,Math.abs(p2[0]-p[0]));
-   return {text:clean(it.str),x,y:p[1]-fs,w,h:fs};
+   return {text:clean(it.str),x:Math.min(p[0],p2[0]),y:p[1]-fs,w:Math.max(3,Math.abs(p2[0]-p[0])),h:fs};
  }).filter(x=>x.text.length>1);
 }
-function groupLines(blocks){
- const lines=[];
- for(const b of [...blocks].sort((a,b)=>a.y-b.y||a.x-b.x)){
-   let line=lines.find(l=>Math.abs(l.cy-b.y)<Math.max(7,b.h*.75));
-   if(!line){line={cy:b.y,h:b.h,items:[]};lines.push(line)}
-   line.items.push(b);line.cy=(line.cy*(line.items.length-1)+b.y)/line.items.length;line.h=Math.max(line.h,b.h);
- }
- return lines.map(l=>{
-   l.items.sort((a,b)=>a.x-b.x);
-   const text=clean(l.items.map(x=>x.text).join(" "));
-   return {x:l.items[0].x,y:Math.min(...l.items.map(x=>x.y)),w:l.items.at(-1).x+l.items.at(-1).w-l.items[0].x,h:l.h,text};
- }).sort((a,b)=>a.y-b.y||a.x-b.x);
+
+function imageToBase64(canvas){
+ return new Promise(resolve=>canvas.toBlob(b=>{
+   const r=new FileReader();r.onload=()=>resolve(String(r.result).split(",")[1]||"");r.readAsDataURL(b);
+ },"image/jpeg",.84));
 }
 
-function anchorsFromText(blocks){
- return groupLines(blocks).filter(l=>likelyName(l.text)).map(l=>({...l,text:normalizeName(l.text)}));
+function boxCrop(canvas,box){
+ const x=clamp(Math.floor(box.x-box.w*.025),0,canvas.width-1);
+ const y=clamp(Math.floor(box.y-box.h*.025),0,canvas.height-1);
+ const r=clamp(Math.ceil(box.x+box.w+box.w*.025),x+1,canvas.width);
+ const b=clamp(Math.ceil(box.y+box.h+box.h*.025),y+1,canvas.height);
+ const out=document.createElement("canvas");out.width=r-x;out.height=b-y;
+ out.getContext("2d").drawImage(canvas,x,y,out.width,out.height,0,0,out.width,out.height);
+ return out.toDataURL("image/png");
 }
 
-/*
-  Layout segmentation:
-  - Each valid perfume name is an anchor.
-  - X boundaries come from the midpoints between column centers, not from the
-    width of the name. This prevents short names from cutting bottles.
-  - Y boundaries come from midpoints between rows.
-  - The product region starts immediately below the name.
-  - Margins are conservative and never expand to the entire page.
-*/
-function layoutBoxes(anchors,W,H){
- if(!anchors.length)return [];
- const rows=[];
- for(const a of anchors){
-   let r=rows.find(r=>Math.abs(r.cy-a.y)<Math.max(20,a.h*1.8));
-   if(!r){r={cy:a.y,items:[]};rows.push(r)}
-   r.items.push(a);r.cy=r.items.reduce((s,x)=>s+x.y,0)/r.items.length;
- }
- rows.sort((a,b)=>a.cy-b.cy);
- const allCenters=anchors.map(a=>a.x+a.w/2).sort((a,b)=>a-b);
- const clusters=[];
- for(const c of allCenters){
-   let g=clusters.find(g=>Math.abs(g.c-c)<Math.max(35,W*.025));
-   if(!g)clusters.push(g={c,vals:[]});
-   g.vals.push(c);g.c=g.vals.reduce((s,x)=>s+x,0)/g.vals.length;
- }
- clusters.sort((a,b)=>a.c-b.c);
- const xBounds=[0];
- for(let i=0;i<clusters.length-1;i++)xBounds.push((clusters[i].c+clusters[i+1].c)/2);
- xBounds.push(W);
- const boxes=[];
- for(let ri=0;ri<rows.length;ri++){
-   const row=rows[ri];
-   const next=rows[ri+1];
-   for(const a of row.items){
-     const cx=a.x+a.w/2;
-     let ci=clusters.reduce((best,g,i)=>Math.abs(g.c-cx)<Math.abs(clusters[best].c-cx)?i:best,0);
-     let left=xBounds[ci],right=xBounds[ci+1];
-     const top=clamp(a.y+a.h+Math.max(5,a.h*.35),0,H);
-     const bottom=next?clamp((row.cy+next.cy)/2-5,top+50,H-4):H-4;
-     const padX=Math.min(12,(right-left)*.035);
-     left+=padX;right-=padX;
-     if(right-left>70&&bottom-top>70)boxes.push({x:left,y:top,w:right-left,h:bottom-top,text:a.text,score:0.98,label:"name-anchor"});
-   }
- }
- return dedupe(boxes,.75).sort((a,b)=>a.y-b.y||a.x-b.x);
+async function analyzePage(canvas,textBlocks,pageNumber){
+ const image=await imageToBase64(canvas);
+ const hints=groupTextLines(textBlocks).map(x=>x.text).filter(likelyName).slice(0,80);
+ const r=await fetch(API+"/ai-page",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({image,width:canvas.width,height:canvas.height,textHints:hints,pageNumber})});
+ if(!r.ok)throw new Error(await r.text());
+ return await r.json();
 }
 
+async function identify(name){
+ try{const r=await fetch(API+"/fragrantica?name="+encodeURIComponent(name));if(!r.ok)return null;return await r.json()}catch(_){return null}
+}
+async function imageSearch(name){
+ try{const r=await fetch(API+"/images?name="+encodeURIComponent(name));if(!r.ok)return null;return await r.json()}catch(_){return null}
+}
+async function enrich(p){
+ const q=normalizeName(p.name);
+ if(!likelyName(q))return false;
+ const frag=await identify(q);
+ if(frag?.name){
+   p.name=normalizeName(frag.name);
+   p.fragrantica=frag.url||null;
+   if(frag.image&&!p.cleanImage)p.cleanImage=frag.image;
+ }
+ const img=await imageSearch(p.name);
+ if(img?.image){
+   p.src=img.image;p.imageSource=img.source||"Google Images";p.imageUrl=img.url||null;p.cleanImage=true;
+ }else if(frag?.image){
+   p.src=frag.image;p.imageSource="Fragrantica";p.imageUrl=frag.url||null;p.cleanImage=true;
+ }
+ return true;
+}
 function iou(a,b){
  const x=Math.max(a.x,b.x),y=Math.max(a.y,b.y),r=Math.min(a.x+a.w,b.x+b.w),bt=Math.min(a.y+a.h,b.y+b.h);
  const inter=Math.max(0,r-x)*Math.max(0,bt-y),u=a.w*a.h+b.w*b.h-inter;return u?inter/u:0;
 }
-function dedupe(boxes,threshold=.55){
- const out=[];
- for(const b of [...boxes].sort((a,b)=>(b.score||0)-(a.score||0)))if(!out.some(x=>iou(x,b)>threshold))out.push(b);
- return out;
+function rejectBadBox(box,W,H){
+ const area=box.w*box.h,ratio=area/(W*H);
+ return !box||!isFinite(area)||box.w<W*.03||box.h<H*.03||ratio>.72;
 }
-
-function cropCanvas(src,b){
- const x=clamp(Math.floor(b.x),0,src.width-1),y=clamp(Math.floor(b.y),0,src.height-1);
- const r=clamp(Math.ceil(b.x+b.w),x+1,src.width),bt=clamp(Math.ceil(b.y+b.h),y+1,src.height);
- const out=document.createElement("canvas");out.width=r-x;out.height=bt-y;
- out.getContext("2d").drawImage(src,x,y,out.width,out.height,0,0,out.width,out.height);return out;
-}
-
-/* Remove only uniform supplier background; do not use corner-color trimming
-   aggressively because it can destroy transparent/colored perfume bottles. */
-async function trimSafe(dataUrl){
- return new Promise(resolve=>{
-  const im=new Image();im.onload=()=>{
-    const c=document.createElement("canvas");c.width=im.naturalWidth;c.height=im.naturalHeight;c.getContext("2d").drawImage(im,0,0);
-    const ctx=c.getContext("2d"),d=ctx.getImageData(0,0,c.width,c.height).data;
-    const pts=[[0,0],[c.width-1,0],[0,c.height-1],[c.width-1,c.height-1]];
-    const bg=pts.map(([x,y])=>{const i=(y*c.width+x)*4;return[d[i],d[i+1],d[i+2]]}).reduce((s,v)=>[s[0]+v[0],s[1]+v[1],s[2]+v[2]],[0,0,0]).map(v=>v/4);
-    let minX=c.width,minY=c.height,maxX=-1,maxY=-1;
-    const threshold=70;
-    for(let y=0;y<c.height;y+=3)for(let x=0;x<c.width;x+=3){
-      const i=(y*c.width+x)*4,dist=Math.abs(d[i]-bg[0])+Math.abs(d[i+1]-bg[1])+Math.abs(d[i+2]-bg[2]);
-      if(dist>threshold){minX=Math.min(minX,x);minY=Math.min(minY,y);maxX=Math.max(maxX,x);maxY=Math.max(maxY,y)}
-    }
-    const area=(maxX-minX+1)*(maxY-minY+1),full=c.width*c.height;
-    if(maxX<0||area/full<.08||area/full>.98){resolve(dataUrl);return}
-    const pad=Math.round(Math.max(c.width,c.height)*.025);
-    minX=clamp(minX-pad,0,c.width-1);minY=clamp(minY-pad,0,c.height-1);maxX=clamp(maxX+pad,0,c.width-1);maxY=clamp(maxY+pad,0,c.height-1);
-    const o=document.createElement("canvas");o.width=maxX-minX+1;o.height=maxY-minY+1;o.getContext("2d").drawImage(c,minX,minY,o.width,o.height,0,0,o.width,o.height);
-    resolve(o.toDataURL("image/png"));
-  };im.onerror=()=>resolve(dataUrl);im.src=dataUrl;
- });
-}
-
-async function getVision(){
- if(visionModel)return visionModel;
- $("status").textContent="Cargando IA visual…";
- visionModel=await cocoSsd.load({base:"lite_mobilenet_v2"});return visionModel;
-}
-async function visualBoxes(canvas,blocks){
- const model=await getVision(),ds=await model.detect(canvas,100,0.15);
- return dedupe(ds.filter(d=>d.class==="bottle"&&d.score>=.15).map(d=>({x:d.bbox[0],y:d.bbox[1],w:d.bbox[2],h:d.bbox[3],score:d.score,label:"IA-bottle",text:""})));
-}
-
-async function getOCR(){
- if(ocrWorker)return ocrWorker;
- $("status").textContent="Cargando OCR de respaldo…";
- ocrWorker=await Tesseract.createWorker("eng");
- return ocrWorker;
-}
-async function ocrAnchors(canvas){
- try{
-   const w=await getOCR(),res=await w.recognize(canvas);
-   const words=res.data.words||[],blocks=words.filter(x=>x.confidence>=45).map(x=>({text:clean(x.text),x:x.bbox.x0,y:x.bbox.y0,w:x.bbox.x1-x.bbox.x0,h:x.bbox.y1-x.bbox.y0}));
-   return anchorsFromText(blocks);
- }catch(e){console.warn("OCR",e);return []}
-}
-
-async function identify(name){
- try{const r=await fetch(API+"/fragrantica?name="+encodeURIComponent(name));if(!r.ok)return null;return await r.json()}catch(e){return null}
-}
-async function imageSearch(name){
- try{const r=await fetch(API+"/images?name="+encodeURIComponent(name));if(!r.ok)return null;return await r.json()}catch(e){return null}
-}
-async function enrich(p){
- const q=normalizeName(p.name);if(!likelyName(q))return false;
- const frag=await identify(q);
- if(frag?.name){
-   p.name=frag.name;
-   p.fragrantica=frag.url||null;
-   p.identity="Fragrantica";
-   p.confidence=Math.max(Number(p.confidence)||0,.92);
- }
- // Google Images is the preferred clean-image source. Fragrantica is the
- // identity/name source and the fallback image source when Google is unavailable.
- const img=await imageSearch(p.name);
- if(img?.image){
-   p.src=img.image;
-   p.imageSource=img.source||"Google Images";
-   p.imageUrl=img.url||null;
- }else if(frag?.image){
-   p.src=frag.image;
-   p.imageSource="Fragrantica";
-   p.imageUrl=frag.url||null;
- }
- return true;
-}
-
-function setProgress(v){$("bar").style.width=clamp(v,0,100)+"%"}
 function render(){
  $("grid").innerHTML="";
  state.forEach((p,i)=>{
    const d=document.createElement("article");d.className="card"+(p.review?" review":"");
-   d.innerHTML='<span class="tag">'+esc(p.kind)+(p.identity?' · '+esc(p.identity):' · revisar')+'</span><div class="pic"><img src="'+esc(p.src)+'" alt=""></div><div class="body"><input value="'+esc(p.name)+'"><div class="ml">'+(typeof p.confidence==="number"?"Confianza: "+Math.round(p.confidence*100)+"%":"Revisar")+(p.imageSource?" · "+esc(p.imageSource):"")+'</div><div class="actions"><button class="alt find">Imagen limpia</button><button class="alt frag">Fragrantica</button><button class="alt del">Eliminar</button></div></div>';
+   d.innerHTML='<span class="tag">'+esc(p.method||"IA")+(p.identity?' · '+esc(p.identity):"")+'</span><div class="pic"><img src="'+esc(p.src)+'" alt=""></div><div class="body"><input value="'+esc(p.name)+'"><div class="meta">Página '+p.page+(typeof p.confidence==="number"?" · Confianza "+Math.round(p.confidence*100)+"%":"")+(p.imageSource?" · Imagen: "+esc(p.imageSource):"")+(p.evidence?"<br>"+esc(p.evidence):"")+'</div><div class="actions"><button class="alt find">Imagen limpia</button><button class="alt frag">Fragrantica</button><button class="alt del">Eliminar</button></div></div>';
    d.querySelector("input").oninput=e=>p.name=e.target.value;
    d.querySelector(".find").onclick=async()=>{await enrich(p);render()};
    d.querySelector(".frag").onclick=async()=>{const m=await identify(p.name);if(m?.url)window.open(m.url,"_blank");else window.open("https://www.google.com/search?q="+encodeURIComponent("site:fragrantica.com/perfume "+p.name),"_blank")};
@@ -255,8 +151,13 @@ function render(){
    $("grid").appendChild(d);
  });
 }
-$("add").onclick=()=>{state.push({name:"Nuevo perfume",src:"data:image/svg+xml;charset=utf8,"+encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="500" height="500"><rect width="100%" height="100%" fill="#050505"/><text x="50%" y="50%" fill="#d9b84a" text-anchor="middle" font-size="30">ZUASH</text></svg>'),kind:"manual",review:true});render()};
-$("search").onclick=async()=>{for(let i=0;i<state.length;i++){await enrich(state[i]);setProgress((i+1)/state.length*100)}render()};
+function setProgress(v){$("bar").style.width=clamp(v,0,100)+"%"}
+
+$("add").onclick=()=>{state.push({name:"Nuevo perfume",src:"data:image/svg+xml;charset=utf8,"+encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="500" height="500"><rect width="100%" height="100%" fill="#050505"/><text x="50%" y="50%" fill="#d9b84a" text-anchor="middle" font-size="30">ZUASH</text></svg>'),kind:"manual",method:"Manual",page:"—",review:true});render()};
+$("search").onclick=async()=>{
+ for(let i=0;i<state.length;i++){await enrich(state[i]);setProgress((i+1)/Math.max(1,state.length)*100)}
+ render();
+};
 $("pdf").onclick=()=>{
  if(!state.length){$("status").textContent="Primero carga un PDF.";return}
  const doc=new jsPDF({unit:"mm",format:"a4"}),W=210,H=297,M=10,G=5,top=22,cw=(W-2*M-G)/2,ch=(H-top-M-G*3)/4;
@@ -265,7 +166,7 @@ $("pdf").onclick=()=>{
    if(i%8===0){doc.setFillColor(7,7,7);doc.rect(0,0,W,H,"F");doc.setTextColor(225,194,82);doc.setFont("helvetica","bold");doc.setFontSize(19);doc.text("ZUASH",W/2,13,{align:"center"});doc.setDrawColor(120,95,25);doc.line(M,17,W-M,17)}
    const k=i%8,x=M+(k%2)*(cw+G),y=top+Math.floor(k/2)*(ch+G);
    doc.setFillColor(15,15,15);doc.roundedRect(x,y,cw,ch,3,3,"F");doc.setDrawColor(48,48,48);doc.roundedRect(x,y,cw,ch,3,3,"S");
-   try{doc.addImage(p.src,p.src.startsWith("data:image/png")?"PNG":"JPEG",x+4,y+5,cw-8,ch-23,undefined,"FAST")}catch(e){}
+   try{doc.addImage(p.src,p.src.startsWith("data:image/png")?"PNG":"JPEG",x+4,y+5,cw-8,ch-23,undefined,"FAST")}catch(_){}
    doc.setTextColor(225,194,82);doc.setFontSize(10);doc.text(p.name||"Perfume",x+cw/2,y+ch-8,{align:"center",maxWidth:cw-8});
  });
  doc.save("Catalogo-ZUASH.pdf");$("status").textContent="Catálogo generado correctamente.";
@@ -274,38 +175,49 @@ $("pdf").onclick=()=>{
 async function readPdf(file){
  if(busy)return;
  if(!file||(!file.type.includes("pdf")&&!file.name.toLowerCase().endsWith(".pdf"))){$("status").textContent="Selecciona un PDF válido.";return}
- busy=true;state.length=0;$("tools").classList.remove("hide");$("grid").innerHTML="";setProgress(0);$("status").textContent="Abriendo PDF…";
+ busy=true;state.length=0;$("tools").classList.remove("hide");$("grid").innerHTML="";$("providers").innerHTML="";setProgress(0);
  try{
    const buf=await file.arrayBuffer();
-   const pdf=await pdfjsLib.getDocument({data:new Uint8Array(buf),useWorkerFetch:true,isEvalSupported:true}).promise;
-   const total=pdf.numPages;
-   for(let n=1;n<=total;n++){
-     $("status").textContent="Analizando página "+n+" de "+total+"…";
-     const page=await pdf.getPage(n),viewport=page.getViewport({scale:2.4});
+   const pdf=await pdfjsLib.getDocument({data:new Uint8Array(buf)}).promise;
+   let used={gemini:false,productSearch:false};
+   for(let n=1;n<=pdf.numPages;n++){
+     $("status").textContent="Comprendiendo página "+n+" de "+pdf.numPages+"…";
+     const page=await pdf.getPage(n),viewport=page.getViewport({scale:2.2});
      const canvas=document.createElement("canvas");canvas.width=Math.ceil(viewport.width);canvas.height=Math.ceil(viewport.height);
-     await page.render({canvasContext:canvas.getContext("2d",{willReadFrequently:true}),viewport}).promise;
-     let blocks=pdfTextBlocks((await page.getTextContent()).items||[],viewport);
-     let anchors=anchorsFromText(blocks);
-     if(!anchors.length)anchors=await ocrAnchors(canvas);
-     let boxes=layoutBoxes(anchors,canvas.width,canvas.height);
-     if(!boxes.length){
-       const visual=await visualBoxes(canvas,blocks);
-       boxes=visual.map(b=>({...b,text:"Perfume",score:b.score,review:true}));
+     await page.render({canvasContext:canvas.getContext("2d"),viewport}).promise;
+     const blocks=pdfTextBlocks((await page.getTextContent()).items||[],viewport);
+     const result=await analyzePage(canvas,blocks,n);
+     used.gemini=used.gemini||Boolean(result.providers?.gemini);
+     used.productSearch=used.productSearch||Boolean(result.providers?.productSearch);
+     const products=result.products||[];
+     const accepted=[];
+     for(const p of products){
+       if(!p.box||rejectBadBox(p.box,canvas.width,canvas.height))continue;
+       if(accepted.some(x=>iou(x,p)>.55))continue;
+       accepted.push(p);
+       const src=boxCrop(canvas,p.box);
+       const item={
+         name:normalizeName(p.name)||"Perfume",
+         src,
+         page:n,
+         confidence:Number(p.confidence)||0,
+         method:p.method||"IA",
+         identity:p.identity||null,
+         evidence:p.evidence||"",
+         review:Number(p.confidence||0)<.6||!likelyName(p.name)
+       };
+       if(likelyName(item.name))await enrich(item);
+       state.push(item);render();
      }
-     if(!boxes.length){$("status").textContent+=" · sin productos detectables";setProgress(n/total*100);continue}
-     for(const b of boxes){
-       const crop=cropCanvas(canvas,b);
-       const raw=crop.toDataURL("image/png");
-       const src=await trimSafe(raw);
-       const p={name:normalizeName(b.text)||"Perfume",src,kind:b.label==="name-anchor"?"Nombre + región":"IA visual",confidence:b.score||.5,review:b.label!=="name-anchor"};
-       if(p.name!=="Perfume")await enrich(p);
-       state.push(p);render();
-     }
-     setProgress(n/total*100);
+     if(!products.length)$("status").textContent="Página "+n+": ningún producto individual confirmado.";
+     setProgress(n/pdf.numPages*100);
    }
-   $("status").textContent=state.length+" productos separados. Ninguna página completa se convirtió en producto.";
- }catch(e){console.error(e);$("status").textContent="No se pudo procesar el PDF: "+(e?.message||"error desconocido")}
- finally{busy=false}
+   $("providers").innerHTML='<span class="pill">Gemini '+(used.gemini?"✓":"no configurado")+'</span><span class="pill">Product Search '+(used.productSearch?"✓":"opcional")+'</span><span class="pill">Fragrantica ✓</span><span class="pill">Google Images '+(typeof fetch==="function"?"vía API":"—")+'</span>';
+   $("status").textContent=state.length+" productos individuales confirmados. Las páginas completas nunca se usan como producto.";
+ }catch(e){
+   console.error(e);
+   $("status").textContent="No se pudo procesar el PDF: "+(e?.message||"error desconocido");
+ }finally{busy=false}
 }
 window.addEventListener("error",e=>{if(e.message)$("status").textContent="Error: "+e.message});
 </script>
