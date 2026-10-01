@@ -1,5 +1,10 @@
 function cleanName(value) {
-  return String(value || "").replace(/\s+/g, " ").trim();
+  let s = String(value || "").replace(/\s+/g, " ").trim();
+  s = s.replace(/^\s*[#№]?\s*\d{1,4}[\s.):-]+/,"");
+  s = s.replace(/\s+(?:ig|instagram|whatsapp|wa|tel(?:éfono)?|cel(?:ular)?)[\s:.-]*\S.*$/i,"");
+  s = s.replace(/\s+@\w+.*$/,"");
+  s = s.replace(/\s+(?:https?:\/\/|www\.)\S+$/i,"");
+  return s.trim();
 }
 
 function boxFromGemini(raw, width, height) {
@@ -79,7 +84,9 @@ async function geminiDetect({ image, width, height, textHints }) {
     "Analiza esta página de un catálogo/proveedor de perfumes.",
     "Tu tarea es detectar TODOS los perfumes individuales que aparezcan, incluso si hay varios en una misma página.",
     "Cada producto debe tener una caja que encierre solamente su botella o caja/packaging del perfume, NO toda la página y NO el texto de contacto del proveedor.",
-    "El texto que está encima de un producto suele ser su nombre. Úsalo como evidencia para asociar correctamente cada producto.",
+    "El texto que está directamente encima de cada imagen/botella suele ser el nombre del perfume. Asocia cada nombre con el producto que está justo debajo o más próximo verticalmente; si hay varios perfumes en la misma página, devuelve una entrada separada para cada uno.",
+"Prioriza el nombre visible encima del perfume sobre números o códigos del proveedor. Un nombre puede contener números legítimos (por ejemplo 212 o 1 Million), así que no elimines números internos del nombre.",
+"Si el texto está acompañado por un número de referencia, @usuario de Instagram, teléfono, WhatsApp, precio, código, SKU o nombre del proveedor, excluye esos datos del campo name."
     "No cuentes logos, Instagram, WhatsApp, teléfonos, precios, números de referencia ni adornos como productos.",
     "No inventes productos. Si una región no contiene un perfume individual, no la devuelvas.",
     "Puedes identificar el perfume por el texto visible o por la apariencia de la botella/caja.",
