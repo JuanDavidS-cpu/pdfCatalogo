@@ -16,7 +16,7 @@ app=FastAPI(title="ZUASH PDF Text AI Engine",version="5.0.0")
 app.mount("/web",StaticFiles(directory="web"),name="web")
 J={}; L=threading.Lock(); OUT=os.path.join(os.path.dirname(__file__),"generated"); os.makedirs(OUT,exist_ok=True)
 
-TEXT_PROMPT="""Analiza SOLO texto de catalogo de perfumes. Identifica unicamente perfumes/fragrancias vendibles. Ignora precios, SKU, telefonos, Instagram, WhatsApp, direcciones, proveedores, descuentos, tamanos y publicidad. Conserva numeros legitimos (212, 1 Million, 9PM) y variantes EDT, EDP, Elixir, Parfum. Corrige errores evidentes. No inventes. Devuelve SOLO JSON: {"perfumes":[{"name":"","brand":"","variant":"","confidence":0}]}"""
+TEXT_PROMPT="""Analiza SOLO el texto extraido de un catalogo de perfumes. Cada bloque [PAGINA N] puede contener UNO O VARIOS perfumes. Identifica todos los nombres de perfumes/fragrancias vendibles, incluso si el texto viene de OCR y contiene errores menores. El nombre suele aparecer cerca del producto y puede estar en una linea separada. Ignora precios, SKU, telefonos, Instagram, WhatsApp, direcciones, proveedores, descuentos, tamanos y publicidad. Conserva numeros legitimos del nombre (212, 1 Million, 9PM) y variantes EDT, EDP, Elixir, Parfum. Corrige solo errores evidentes de OCR; no inventes. Si no puedes determinar la marca, deja brand vacio pero conserva el nombre. Devuelve TODOS los candidatos razonables y SOLO JSON: {"perfumes":[{"name":"","brand":"","variant":"","confidence":0}]}"""
 
 def upd(j,p,s,d="",**x):
     with L:
@@ -107,11 +107,6 @@ def text_identify(text):
 def page_png(page):
     pix=page.get_pixmap(matrix=fitz.Matrix(1.5,1.5),alpha=False)
     return pix.tobytes("png")
-
-def vision_identify_removed(png):
-    img=base64.b64encode(png).decode("ascii")
-    r=ollama.Client(host=HOST).chat(model=VISION_MODEL,messages=[{"role":"user","content":VISION_PROMPT,"images":[img]}],options={"temperature":0})
-    return parse_json(r["message"]["content"])
 
 def fragrantica(q):
     urls=[]; h={"User-Agent":"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/154 Safari/537.36"}
