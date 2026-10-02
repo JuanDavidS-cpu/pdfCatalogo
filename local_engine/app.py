@@ -11,9 +11,8 @@ try: from ddgs import DDGS
 except Exception: DDGS=None
 
 TEXT_MODEL=os.getenv("QWEN_MODEL","qwen3:8b")
-VISION_MODEL=os.getenv("QWEN_VISION_MODEL","qwen3-vl:8b")
 HOST=os.getenv("OLLAMA_HOST","http://127.0.0.1:11434")
-app=FastAPI(title="ZUASH PDF AI Engine",version="4.0.0")
+app=FastAPI(title="ZUASH PDF Text AI Engine",version="5.0.0")
 app.mount("/web",StaticFiles(directory="web"),name="web")
 J={}; L=threading.Lock(); OUT=os.path.join(os.path.dirname(__file__),"generated"); os.makedirs(OUT,exist_ok=True)
 
@@ -25,8 +24,17 @@ def upd(j,p,s,d="",**x):
         if j in J: J[j].update(percent=int(max(0,min(100,p))),stage=s,detail=d,**x)
 
 def extract_text(page):
+    # Extrae SOLO texto real del PDF. No renderiza ni analiza imagenes.
     blocks=page.get_text("blocks",sort=True)
-    return "\n".join(b[4].strip() for b in blocks if len(b)>4 and b[4].strip())
+    return "\n".join(b[4].strip() for b in blocks if len(b)>6 and b[6]==0 and b[4].strip())
+
+def extract_document(doc,j):
+    pages=[]; total=len(doc)
+    for i,page in enumerate(doc,1):
+        text=extract_text(page)
+        pages.append({"page":i,"text":text})
+        upd(j,5+int(i/max(total,1)*30),f"Extrayendo texto · pagina {i}/{total}",f"{len(text)} caracteres")
+    return pages
 
 def clean(s):
     s=re.sub(r"https?://\S+|www\.\S+|@\w+"," ",str(s),flags=re.I)
@@ -101,30 +109,49 @@ def enrich(p):
 def run(j,data):
     try:
         upd(j,2,"Recibiendo PDF","Archivo recibido",status="running")
-        doc=fitz.open(stream=data,filetype="pdf"); pages=len(doc); allp=[]
-        for i,page in enumerate(doc,1):
-            upd(j,5+int((i-1)/max(pages,1)*45),f"IA visual · pagina {i}/{pages}","Qwen3-VL analiza imagenes")
-            found=[]
-            try: found=vision_identify(page_png(page))
+        doc=fitz.open(stream=data,filetype="pdf")
+        pages=extract_document(doc,j); doc.close()
+
+        # Todo el PDF se analiza como texto. Se usan bloques de texto
+        # para conservar el contexto de paginas sin analizar imagenes.
+        chunks=[]; current=[]; chars=0; LIMIT=18000
+        for p in pages:
+            piece=f"\n[PAGINA {p['page']}]\n{p['text']}\n"
+            if current and chars+len(piece)>LIMIT:
+                chunks.append(current); current=[]; chars=0
+            current.append(piece); chars+=len(piece)
+        if current: chunks.append(current)
+
+        allp=[]
+        for ci,chunk in enumerate(chunks,1):
+            upd(j,38+int((ci-1)/max(len(chunks),1)*24),f"Qwen3 · bloque {ci}/{len(chunks)}","Analizando SOLO texto extraido del PDF")
+            try: found=text_identify("".join(chunk))
             except Exception as e:
-                txt=extract_text(page)
-                if txt:
-                    try: found=text_identify(txt)
-                    except Exception: found=[]
-            for x in found: x["page"]=i; allp.append(x)
-        doc.close()
+                found=[]; upd(j,40,f"Qwen3 · bloque {ci}",str(e))
+            for x in found:
+                page_nums=[]
+                for p in pages:
+                    terms=[x["name"],x.get("variant",""),x.get("brand","")]
+                    if any(tok and len(tok)>2 and tok.lower() in p["text"].lower() for tok in terms):
+                        page_nums.append(p["page"])
+                x["pages"]=page_nums or [1]; x["page"]=x["pages"][0]; allp.append(x)
+
+        # Dedupe global del documento.
         m={}
         for p in allp:
-            k=(p["name"]+" "+p.get("brand","")+" "+p.get("variant","")).lower()
-            if k not in m: m[k]=p.copy(); m[k]["pages"]=[p["page"]]
-            elif p["page"] not in m[k]["pages"]: m[k]["pages"].append(p["page"])
+            k=re.sub(r"\s+"," ",(p["name"]+" "+p.get("brand","")+" "+p.get("variant","")).lower()).strip()
+            if k not in m: m[k]=p.copy()
+            else: m[k]["pages"]=sorted(set(m[k].get("pages",[])+p.get("pages",[])))
+
         items=list(m.values()); res=[]
         for i,p in enumerate(items,1):
-            upd(j,52+int((i-1)/max(len(items),1)*43),f"Buscando {i}/{len(items)}","Fragrantica + imagen Google · "+p["name"])
+            upd(j,62+int((i-1)/max(len(items),1)*36),f"Buscando {i}/{len(items)}","Fragrantica + imagen Google · "+p["name"])
             try: res.append(enrich(p))
-            except Exception: p.update({"found":False,"fragrantica_url":"","fragrantica_image_url":"","matched_title":"","image_url":""}); res.append(p)
-        result={"products":res,"stats":{"pages":pages,"detected":len(allp),"unique":len(res),"found":sum(x.get("found",False) for x in res)}}
-        with L: J[j].update(status="done",percent=100,stage="Completado",detail="Analisis terminado",result=result)
+            except Exception:
+                p.update({"found":False,"fragrantica_url":"","fragrantica_image_url":"","matched_title":"","image_url":""}); res.append(p)
+
+        result={"products":res,"stats":{"pages":len(pages),"detected":len(allp),"unique":len(res),"found":sum(x.get("found",False) for x in res)}}
+        with L: J[j].update(status="done",percent=100,stage="Completado",detail="Analisis de texto terminado",result=result)
     except Exception as e:
         with L: J[j].update(status="error",percent=100,stage="Error",detail=str(e))
 
@@ -166,7 +193,7 @@ def root(): return FileResponse("web/index.html")
 def health():
     try: models=[x.get("name") for x in ollama.Client(host=HOST).list().get("models",[])]; ok=True
     except Exception: models=[]; ok=False
-    return {"ok":True,"ollama":ok,"text_model":TEXT_MODEL,"vision_model":VISION_MODEL,"vision_ready":VISION_MODEL in models,"text_ready":TEXT_MODEL in models,"models":models}
+    return {"ok":True,"ollama":ok,"text_model":TEXT_MODEL,"text_ready":TEXT_MODEL in models,"models":models}
 
 @app.post("/api/analyze-pdf")
 async def analyze(file:UploadFile=File(...)):
