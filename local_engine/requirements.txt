@@ -1,8 +1,10 @@
 fastapi>=0.116
 uvicorn[standard]>=0.35
-python-multipart>=0.20
+python-multipart>=0.0.32
 pymupdf>=1.26
 requests>=2.32
 beautifulsoup4>=4.13
 ollama>=0.5
 ddgs>=9.6
+reportlab>=4.2
+pillow>=11.0
