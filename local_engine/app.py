@@ -37,6 +37,9 @@ def setup_tesseract():
                 cmd=p; break
     if cmd:
         os.environ["TESSERACT_CMD"]=cmd
+        folder=os.path.dirname(cmd)
+        if folder and folder not in os.environ.get("PATH","").split(os.pathsep):
+            os.environ["PATH"]=folder+os.pathsep+os.environ.get("PATH","")
     return cmd
 
 def extract_text(page):
