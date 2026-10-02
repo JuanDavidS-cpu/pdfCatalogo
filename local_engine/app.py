@@ -108,7 +108,7 @@ def page_png(page):
     pix=page.get_pixmap(matrix=fitz.Matrix(1.5,1.5),alpha=False)
     return pix.tobytes("png")
 
-def vision_identify(png):
+def vision_identify_removed(png):
     img=base64.b64encode(png).decode("ascii")
     r=ollama.Client(host=HOST).chat(model=VISION_MODEL,messages=[{"role":"user","content":VISION_PROMPT,"images":[img]}],options={"temperature":0})
     return parse_json(r["message"]["content"])
@@ -249,7 +249,8 @@ def root(): return FileResponse("web/index.html")
 def health():
     try: models=[x.get("name") for x in ollama.Client(host=HOST).list().get("models",[])]; ok=True
     except Exception: models=[]; ok=False
-    return {"ok":True,"ollama":ok,"text_model":TEXT_MODEL,"text_ready":TEXT_MODEL in models,"models":models}
+    return {"ok":True,"ollama":ok,"text_model":TEXT_MODEL,"text_ready":TEXT_MODEL in models,
+            "ocr_available":bool(setup_tesseract()),"ocr_lang":OCR_LANG,"models":models}
 
 @app.post("/api/analyze-pdf")
 async def analyze(file:UploadFile=File(...)):
