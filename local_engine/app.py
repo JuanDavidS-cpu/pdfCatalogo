@@ -24,17 +24,26 @@ def upd(j,p,s,d="",**x):
         if j in J: J[j].update(percent=int(max(0,min(100,p))),stage=s,detail=d,**x)
 
 def extract_text(page):
-    # Extrae SOLO texto real del PDF. No renderiza ni analiza imagenes.
+    # Extrae texto real del PDF. No usa vision para identificar perfumes.
+    text=page.get_text("text",sort=True).strip()
+    if text:
+        return text
     blocks=page.get_text("blocks",sort=True)
-    return "\n".join(b[4].strip() for b in blocks if len(b)>6 and b[6]==0 and b[4].strip())
+    text="\n".join(b[4].strip() for b in blocks if len(b)>6 and b[6]==0 and b[4].strip())
+    if text.strip():
+        return text.strip()
+    words=page.get_text("words",sort=True)
+    return " ".join(w[4] for w in words if w[4].strip()).strip()
 
 def extract_document(doc,j):
-    pages=[]; total=len(doc)
+    pages=[]; total=len(doc); total_chars=0; empty_pages=[]
     for i,page in enumerate(doc,1):
         text=extract_text(page)
+        total_chars+=len(text)
+        if not text: empty_pages.append(i)
         pages.append({"page":i,"text":text})
         upd(j,5+int(i/max(total,1)*30),f"Extrayendo texto · pagina {i}/{total}",f"{len(text)} caracteres")
-    return pages
+    return pages,total_chars,empty_pages
 
 def clean(s):
     s=re.sub(r"https?://\S+|www\.\S+|@\w+"," ",str(s),flags=re.I)
@@ -110,7 +119,10 @@ def run(j,data):
     try:
         upd(j,2,"Recibiendo PDF","Archivo recibido",status="running")
         doc=fitz.open(stream=data,filetype="pdf")
-        pages=extract_document(doc,j); doc.close()
+        pages,total_chars,empty_pages=extract_document(doc,j); doc.close()
+        if total_chars==0:
+            raise RuntimeError("No se pudo extraer texto del PDF. Las paginas pueden estar convertidas en imagenes o curvas. Si el texto se ve pero no se puede seleccionar, necesitamos activar OCR.")
+        upd(j,35,"Texto extraido",f"{total_chars:,} caracteres · {len(empty_pages)} paginas sin texto")
 
         # Todo el PDF se analiza como texto. Se usan bloques de texto
         # para conservar el contexto de paginas sin analizar imagenes.
@@ -150,7 +162,7 @@ def run(j,data):
             except Exception:
                 p.update({"found":False,"fragrantica_url":"","fragrantica_image_url":"","matched_title":"","image_url":""}); res.append(p)
 
-        result={"products":res,"stats":{"pages":len(pages),"detected":len(allp),"unique":len(res),"found":sum(x.get("found",False) for x in res)}}
+        result={"products":res,"stats":{"pages":len(pages),"characters":total_chars,"empty_text_pages":empty_pages,"detected":len(allp),"unique":len(res),"found":sum(x.get("found",False) for x in res)}}
         with L: J[j].update(status="done",percent=100,stage="Completado",detail="Analisis de texto terminado",result=result)
     except Exception as e:
         with L: J[j].update(status="error",percent=100,stage="Error",detail=str(e))
