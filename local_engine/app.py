@@ -1,4 +1,4 @@
-import os,re,json,time,uuid,threading,base64,io
+import os,re,json,time,uuid,threading,base64,io,shutil
 import fitz,requests,ollama
 from bs4 import BeautifulSoup
 from fastapi import FastAPI,File,UploadFile,HTTPException
@@ -17,33 +17,68 @@ app.mount("/web",StaticFiles(directory="web"),name="web")
 J={}; L=threading.Lock(); OUT=os.path.join(os.path.dirname(__file__),"generated"); os.makedirs(OUT,exist_ok=True)
 
 TEXT_PROMPT="""Analiza SOLO texto de catalogo de perfumes. Identifica unicamente perfumes/fragrancias vendibles. Ignora precios, SKU, telefonos, Instagram, WhatsApp, direcciones, proveedores, descuentos, tamanos y publicidad. Conserva numeros legitimos (212, 1 Million, 9PM) y variantes EDT, EDP, Elixir, Parfum. Corrige errores evidentes. No inventes. Devuelve SOLO JSON: {"perfumes":[{"name":"","brand":"","variant":"","confidence":0}]}"""
-VISION_PROMPT="""Analiza visualmente esta pagina de un catalogo de perfumes. Identifica TODOS los perfumes que aparecen, incluso si hay varios en la misma pagina. Lee el nombre de la caja/botella y usa el contexto visual para distinguir marca y variante. Ignora telefonos, Instagram, precios, SKU, nombres de proveedores y publicidad. No inventes. Devuelve SOLO JSON valido: {"perfumes":[{"name":"","brand":"","variant":"","confidence":0}]}. Si no hay perfumes devuelve {"perfumes":[]}."""
 
 def upd(j,p,s,d="",**x):
     with L:
         if j in J: J[j].update(percent=int(max(0,min(100,p))),stage=s,detail=d,**x)
 
+OCR_LANG=os.getenv("OCR_LANG","eng")
+OCR_DPI=int(os.getenv("OCR_DPI","200"))
+TESSERACT_CMD=os.getenv("TESSERACT_CMD","").strip()
+
+def setup_tesseract():
+    cmd=TESSERACT_CMD or shutil.which("tesseract")
+    if not cmd:
+        for p in [
+            r"C:\Program Files\Tesseract-OCR\tesseract.exe",
+            r"C:\Program Files (x86)\Tesseract-OCR\tesseract.exe",
+        ]:
+            if os.path.isfile(p):
+                cmd=p; break
+    if cmd:
+        os.environ["TESSERACT_CMD"]=cmd
+    return cmd
+
 def extract_text(page):
-    # Extrae texto real del PDF. No usa vision para identificar perfumes.
+    # Primero usa la capa de texto real. OCR solo es fallback para paginas
+    # escaneadas o con una capa practicamente vacia. Nunca se usa vision.
     text=page.get_text("text",sort=True).strip()
     if text:
-        return text
+        return text,False
     blocks=page.get_text("blocks",sort=True)
     text="\n".join(b[4].strip() for b in blocks if len(b)>6 and b[6]==0 and b[4].strip())
     if text.strip():
-        return text.strip()
+        return text.strip(),False
     words=page.get_text("words",sort=True)
-    return " ".join(w[4] for w in words if w[4].strip()).strip()
+    return " ".join(w[4] for w in words if w[4].strip()).strip(),False
 
 def extract_document(doc,j):
-    pages=[]; total=len(doc); total_chars=0; empty_pages=[]
+    pages=[]; total=len(doc); total_chars=0; empty_pages=[]; ocr_pages=[]
+    tess=setup_tesseract()
     for i,page in enumerate(doc,1):
-        text=extract_text(page)
+        text,_=extract_text(page)
+        used_ocr=False
+        if len(text.strip()) < 30 and tess:
+            try:
+                upd(j,5+int((i-1)/max(total,1)*25),f"OCR · pagina {i}/{total}",
+                    f"Pagina con {len(text)} caracteres; intentando OCR")
+                tp=page.get_textpage_ocr(language=OCR_LANG,dpi=OCR_DPI,full=True)
+                ocr_text=page.get_text("text",textpage=tp,sort=True).strip()
+                if len(ocr_text)>len(text):
+                    text=ocr_text
+                    used_ocr=True
+                    ocr_pages.append(i)
+            except Exception as e:
+                print(f"[OCR] pagina {i}/{total}: {e}",flush=True)
         total_chars+=len(text)
         if not text: empty_pages.append(i)
-        pages.append({"page":i,"text":text})
-        upd(j,5+int(i/max(total,1)*30),f"Extrayendo texto · pagina {i}/{total}",f"{len(text)} caracteres")
-    return pages,total_chars,empty_pages
+        pages.append({"page":i,"text":text,"ocr":used_ocr})
+        pct=5+int(i/max(total,1)*30)
+        upd(j,pct,f"Extrayendo texto · pagina {i}/{total}",
+            f"{len(text)} caracteres" + (" · OCR" if used_ocr else ""))
+        print(f"[{pct:3d}%] Extrayendo pagina {i}/{total} · {len(text)} caracteres"
+              + (" · OCR" if used_ocr else ""),flush=True)
+    return pages,total_chars,empty_pages,ocr_pages,tess
 
 def clean(s):
     s=re.sub(r"https?://\S+|www\.\S+|@\w+"," ",str(s),flags=re.I)
@@ -119,10 +154,13 @@ def run(j,data):
     try:
         upd(j,2,"Recibiendo PDF","Archivo recibido",status="running")
         doc=fitz.open(stream=data,filetype="pdf")
-        pages,total_chars,empty_pages=extract_document(doc,j); doc.close()
+        pages,total_chars,empty_pages,ocr_pages,tess=extract_document(doc,j); doc.close()
+        if total_chars==0 and not tess:
+            raise RuntimeError("El PDF no tiene capa de texto y no se encontro Tesseract para activar OCR. Instala Tesseract OCR o configura TESSERACT_CMD.")
         if total_chars==0:
-            raise RuntimeError("No se pudo extraer texto del PDF. Las paginas pueden estar convertidas en imagenes o curvas. Si el texto se ve pero no se puede seleccionar, necesitamos activar OCR.")
-        upd(j,35,"Texto extraido",f"{total_chars:,} caracteres · {len(empty_pages)} paginas sin texto")
+            raise RuntimeError("OCR no pudo extraer texto de ninguna pagina. Revisa que Tesseract OCR este instalado y que OCR_LANG coincida con los idiomas disponibles.")
+        upd(j,35,"Texto extraido",f"{total_chars:,} caracteres · {len(ocr_pages)} paginas con OCR · {len(empty_pages)} paginas sin texto")
+        print(f"[ 35%] Texto listo · {total_chars:,} caracteres · OCR {len(ocr_pages)}/{len(pages)} paginas",flush=True)
 
         # Todo el PDF se analiza como texto. Se usan bloques de texto
         # para conservar el contexto de paginas sin analizar imagenes.
@@ -136,7 +174,9 @@ def run(j,data):
 
         allp=[]
         for ci,chunk in enumerate(chunks,1):
-            upd(j,38+int((ci-1)/max(len(chunks),1)*24),f"Qwen3 · bloque {ci}/{len(chunks)}","Analizando SOLO texto extraido del PDF")
+            pct=38+int((ci-1)/max(len(chunks),1)*24)
+            upd(j,pct,f"Qwen3 · bloque {ci}/{len(chunks)}","Analizando texto extraido del PDF")
+            print(f"[{pct:3d}%] Qwen3 · bloque {ci}/{len(chunks)}",flush=True)
             try: found=text_identify("".join(chunk))
             except Exception as e:
                 found=[]; upd(j,40,f"Qwen3 · bloque {ci}",str(e))
@@ -157,14 +197,18 @@ def run(j,data):
 
         items=list(m.values()); res=[]
         for i,p in enumerate(items,1):
-            upd(j,62+int((i-1)/max(len(items),1)*36),f"Buscando {i}/{len(items)}","Fragrantica + imagen Google · "+p["name"])
+            pct=62+int((i-1)/max(len(items),1)*36)
+            upd(j,pct,f"Buscando {i}/{len(items)}","Fragrantica + imagen Google · "+p["name"])
+            print(f"[{pct:3d}%] Buscando {i}/{len(items)} · {p['name']}",flush=True)
             try: res.append(enrich(p))
             except Exception:
                 p.update({"found":False,"fragrantica_url":"","fragrantica_image_url":"","matched_title":"","image_url":""}); res.append(p)
 
-        result={"products":res,"stats":{"pages":len(pages),"characters":total_chars,"empty_text_pages":empty_pages,"detected":len(allp),"unique":len(res),"found":sum(x.get("found",False) for x in res)}}
-        with L: J[j].update(status="done",percent=100,stage="Completado",detail="Analisis de texto terminado",result=result)
+        result={"products":res,"stats":{"pages":len(pages),"characters":total_chars,"ocr_pages":ocr_pages,"ocr_available":bool(tess),"empty_text_pages":empty_pages,"detected":len(allp),"unique":len(res),"found":sum(x.get("found",False) for x in res)}}
+        print("[100%] Completado · analisis de texto terminado",flush=True)
+        with L: J[j].update(status="done",percent=100,stage="Completado",detail="Analisis de texto + OCR terminado",result=result)
     except Exception as e:
+        print(f"[ERROR] {e}",flush=True)
         with L: J[j].update(status="error",percent=100,stage="Error",detail=str(e))
 
 def download_image(url):
