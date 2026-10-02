@@ -88,11 +88,10 @@ def google_image(q):
     try:
         u="https://www.google.com/search?tbm=isch&q="+requests.utils.quote(q+" perfume bottle")
         html=requests.get(u,headers=h,timeout=15).text
-        m=re.search(r'https://encrypted-tbn0\\.gstatic\\.com/images\\?[^"\\\\]+',html)
+        m=re.search(r'https://encrypted-tbn0\.gstatic\.com/images\?[^"\\]+',html)
         if m: return m.group(0).replace("\\u003d","=")
     except Exception: pass
     return ""
-
 def enrich(p):
     q=" ".join(x for x in [p["name"],p.get("variant",""),p.get("brand","")] if x)
     fr=fragrantica(q); p.update(fr)
