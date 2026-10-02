@@ -1,100 +1,196 @@
-import os,re,json,time,uuid,threading
+import os,re,json,time,uuid,threading,base64,io
 import fitz,requests,ollama
 from bs4 import BeautifulSoup
 from fastapi import FastAPI,File,UploadFile,HTTPException
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
+from reportlab.lib.pagesizes import A4
+from reportlab.pdfgen import canvas
+from PIL import Image
 try: from ddgs import DDGS
 except Exception: DDGS=None
-MODEL=os.getenv("QWEN_MODEL","qwen3:8b"); HOST=os.getenv("OLLAMA_HOST","http://127.0.0.1:11434")
-app=FastAPI(title="ZUASH Text AI Engine",version="3.0.0"); app.mount("/web",StaticFiles(directory="web"),name="web")
-J={}; L=threading.Lock()
-PROMPT="""Analiza SOLO el texto de un catalogo de perfumes. Identifica unicamente perfumes/fragrancias vendibles. Ignora precios, SKU, telefonos, Instagram, WhatsApp, direcciones, proveedores, descuentos, tamanos como 100 ML, categorias y publicidad. Conserva numeros legitimos (212, 1 Million, 9PM) y variantes EDT, EDP, Elixir, Parfum. Corrige errores evidentes de OCR. No inventes. Devuelve SOLO JSON: {"perfumes":[{"name":"","brand":"","variant":"","confidence":0}]}"""
+
+TEXT_MODEL=os.getenv("QWEN_MODEL","qwen3:8b")
+VISION_MODEL=os.getenv("QWEN_VISION_MODEL","qwen3-vl:8b")
+HOST=os.getenv("OLLAMA_HOST","http://127.0.0.1:11434")
+app=FastAPI(title="ZUASH PDF AI Engine",version="4.0.0")
+app.mount("/web",StaticFiles(directory="web"),name="web")
+J={}; L=threading.Lock(); OUT=os.path.join(os.path.dirname(__file__),"generated"); os.makedirs(OUT,exist_ok=True)
+
+TEXT_PROMPT="""Analiza SOLO texto de catalogo de perfumes. Identifica unicamente perfumes/fragrancias vendibles. Ignora precios, SKU, telefonos, Instagram, WhatsApp, direcciones, proveedores, descuentos, tamanos y publicidad. Conserva numeros legitimos (212, 1 Million, 9PM) y variantes EDT, EDP, Elixir, Parfum. Corrige errores evidentes. No inventes. Devuelve SOLO JSON: {"perfumes":[{"name":"","brand":"","variant":"","confidence":0}]}"""
+VISION_PROMPT="""Analiza visualmente esta pagina de un catalogo de perfumes. Identifica TODOS los perfumes que aparecen, incluso si hay varios en la misma pagina. Lee el nombre de la caja/botella y usa el contexto visual para distinguir marca y variante. Ignora telefonos, Instagram, precios, SKU, nombres de proveedores y publicidad. No inventes. Devuelve SOLO JSON valido: {"perfumes":[{"name":"","brand":"","variant":"","confidence":0}]}. Si no hay perfumes devuelve {"perfumes":[]}."""
+
 def upd(j,p,s,d="",**x):
- with L:
-  if j in J:J[j].update(percent=int(p),stage=s,detail=d,**x)
-def extract(data,j):
- d=fitz.open(stream=data,filetype="pdf"); out=[]
- for i,page in enumerate(d,1):
-  blocks=page.get_text("blocks",sort=True); t="\n".join(b[4].strip() for b in blocks if len(b)>4 and b[4].strip())
-  out.append({"page":i,"text":t}); upd(j,8+int(i/max(len(d),1)*27),f"Texto · pagina {i}/{len(d)}",f"{len(t)} caracteres")
- d.close(); return out
+    with L:
+        if j in J: J[j].update(percent=int(max(0,min(100,p))),stage=s,detail=d,**x)
+
+def extract_text(page):
+    blocks=page.get_text("blocks",sort=True)
+    return "\n".join(b[4].strip() for b in blocks if len(b)>4 and b[4].strip())
+
 def clean(s):
- s=re.sub(r"https?://\S+|www\.\S+|@\w+"," ",str(s),flags=re.I)
- s=re.sub(r"(instagram|whatsapp|phone|telefono|tel)\s*[:#-]?\s*\S+"," ",s,flags=re.I)
- s=re.sub(r"^\s*\d{1,4}[\s.)_-]+","",s)
- return re.sub(r"\s+"," ",s).strip(" -:;,.|")
-def identify(t):
- r=ollama.Client(host=HOST).chat(model=MODEL,messages=[{"role":"user","content":PROMPT+"\n\n"+t[:30000]}],options={"temperature":0})
- raw=r["message"]["content"].replace(chr(96),"")
- m=re.search(r'\{\s*"perfumes"\s*:\s*\[.*\]\s*\}',raw,re.S)
- if not m: raise ValueError("Qwen no devolvio JSON")
- out=[]; seen=set()
- for x in json.loads(m.group())["perfumes"]:
-  n,b,v=clean(x.get("name","")),clean(x.get("brand","")),clean(x.get("variant",""))
-  if not n or len(n)>120 or any(w in n.lower() for w in ["instagram","whatsapp","proveedor","precio","catalogo","catalogo"]): continue
-  k=(n+" "+v).lower()
-  if k in seen: continue
-  seen.add(k); out.append({"name":n,"brand":b,"variant":v,"confidence":float(x.get("confidence",0) or 0)})
- return out
+    s=re.sub(r"https?://\S+|www\.\S+|@\w+"," ",str(s),flags=re.I)
+    s=re.sub(r"(instagram|whatsapp|phone|telefono|tel)\s*[:#-]?\s*\S+"," ",s,flags=re.I)
+    return re.sub(r"\s+"," ",s).strip(" -:;,.|")
+
+def parse_json(raw):
+    raw=raw.replace(chr(96),"")
+    m=re.search(r'\{\s*"perfumes"\s*:\s*\[.*?\]\s*\}',raw,re.S)
+    if not m: raise ValueError("Qwen no devolvio JSON")
+    data=json.loads(m.group())
+    out=[]; seen=set()
+    for x in data.get("perfumes",[]):
+        n,b,v=clean(x.get("name","")),clean(x.get("brand","")),clean(x.get("variant",""))
+        if not n or len(n)>120: continue
+        if any(w in n.lower() for w in ["instagram","whatsapp","proveedor","precio","catalogo"]): continue
+        k=(n+" "+b+" "+v).lower()
+        if k in seen: continue
+        seen.add(k); out.append({"name":n,"brand":b,"variant":v,"confidence":float(x.get("confidence",0) or 0)})
+    return out
+
+def text_identify(text):
+    r=ollama.Client(host=HOST).chat(model=TEXT_MODEL,messages=[{"role":"user","content":TEXT_PROMPT+"\n\n"+text[:30000]}],options={"temperature":0})
+    return parse_json(r["message"]["content"])
+
+def page_png(page):
+    pix=page.get_pixmap(matrix=fitz.Matrix(1.5,1.5),alpha=False)
+    return pix.tobytes("png")
+
+def vision_identify(png):
+    img=base64.b64encode(png).decode("ascii")
+    r=ollama.Client(host=HOST).chat(model=VISION_MODEL,messages=[{"role":"user","content":VISION_PROMPT,"images":[img]}],options={"temperature":0})
+    return parse_json(r["message"]["content"])
+
 def fragrantica(q):
- urls=[]; h={"User-Agent":"Mozilla/5.0 Chrome/154 Safari/537.36"}
- if DDGS:
-  try:
-   with DDGS() as d:
-    for r in d.text(f'site:fragrantica.com/perfume/ "{q}"',max_results=5):
-     u=r.get("href") or r.get("url","")
-     if "fragrantica.com/perfume/" in u: urls.append(u.split("?")[0])
-  except Exception: pass
- try:
-  s=BeautifulSoup(requests.get("https://www.fragrantica.com/search/?query="+requests.utils.quote(q),headers=h,timeout=15).text,"html.parser")
-  for a in s.select('a[href*="/perfume/"]'):
-   u=a["href"]; urls.append(("https://www.fragrantica.com"+u if u.startswith("/") else u).split("?")[0])
- except Exception: pass
- for u in dict.fromkeys(urls):
-  try:
-   s=BeautifulSoup(requests.get(u,headers=h,timeout=15).text,"html.parser"); im=s.find("meta",{"property":"og:image"}); tt=s.find("meta",{"property":"og:title"})
-   return {"fragrantica_url":u,"image_url":im.get("content","") if im else "","matched_title":tt.get("content","") if tt else "","found":True}
-  except Exception: pass
- return {"fragrantica_url":"","image_url":"","matched_title":"","found":False}
+    urls=[]; h={"User-Agent":"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/154 Safari/537.36"}
+    if DDGS:
+        try:
+            with DDGS() as d:
+                for r in d.text(f'site:fragrantica.com/perfume/ "{q}"',max_results=8):
+                    u=r.get("href") or r.get("url","")
+                    if "/perfume/" in u: urls.append(u.split("?")[0])
+        except Exception: pass
+    try:
+        s=BeautifulSoup(requests.get("https://www.fragrantica.com/search/?query="+requests.utils.quote(q),headers=h,timeout=15).text,"html.parser")
+        for a in s.select('a[href*="/perfume/"]'):
+            u=a.get("href",""); urls.append(("https://www.fragrantica.com"+u if u.startswith("/") else u).split("?")[0])
+    except Exception: pass
+    for u in dict.fromkeys(urls):
+        try:
+            s=BeautifulSoup(requests.get(u,headers=h,timeout=15).text,"html.parser")
+            im=s.find("meta",{"property":"og:image"}); tt=s.find("meta",{"property":"og:title"})
+            return {"fragrantica_url":u,"fragrantica_image_url":im.get("content","") if im else "","matched_title":tt.get("content","") if tt else "","found":True}
+        except Exception: pass
+    return {"fragrantica_url":"","fragrantica_image_url":"","matched_title":"","found":False}
+
+def google_image(q):
+    h={"User-Agent":"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/154 Safari/537.36"}
+    try:
+        u="https://www.google.com/search?tbm=isch&q="+requests.utils.quote(q+" perfume bottle")
+        html=requests.get(u,headers=h,timeout=15).text
+        m=re.search(r'https://encrypted-tbn0\\.gstatic\\.com/images\\?[^"\\\\]+',html)
+        if m: return m.group(0).replace("\\u003d","=")
+    except Exception: pass
+    return ""
+
+def enrich(p):
+    q=" ".join(x for x in [p["name"],p.get("variant",""),p.get("brand","")] if x)
+    fr=fragrantica(q); p.update(fr)
+    p["image_url"]=google_image(p.get("matched_title") or q) or p.get("fragrantica_image_url","")
+    return p
+
 def run(j,data):
- try:
-  upd(j,2,"Recibiendo PDF","Archivo recibido",status="running"); pages=extract(data,j); allp=[]
-  for i,p in enumerate(pages,1):
-   if not p["text"]: continue
-   upd(j,38+int((i-1)/max(len(pages),1)*27),f"IA · pagina {i}/{len(pages)}","Qwen analiza texto")
-   try: ps=identify(p["text"])
-   except Exception as e: ps=[]; upd(j,40,f"IA · pagina {i}",str(e))
-   for x in ps: x["page"]=i; allp.append(x)
-   upd(j,min(65,40+int(i/max(len(pages),1)*25)),f"Pagina {i}/{len(pages)} procesada",f"{len(ps)} perfumes identificados")
-  m={}
-  for p in allp:
-   k=(p["name"]+" "+p["variant"]).lower()
-   if k not in m: m[k]=p.copy(); m[k]["pages"]=[p["page"]]
-   elif p["page"] not in m[k]["pages"]: m[k]["pages"].append(p["page"])
-  items=list(m.values()); res=[]
-  for i,p in enumerate(items,1):
-   upd(j,67+int((i-1)/max(len(items),1)*27),f"Buscando {i}/{len(items)}",p["name"])
-   p.update(fragrantica(" ".join(x for x in [p["name"],p["variant"],p["brand"]] if x))); res.append(p)
-  result={"products":res,"stats":{"pages":len(pages),"detected":len(allp),"unique":len(res),"found":sum(x["found"] for x in res)}}
-  with L:J[j].update(status="done",percent=100,stage="Completado",detail="Analisis terminado",result=result)
- except Exception as e:
-  with L:J[j].update(status="error",percent=100,stage="Error",detail=str(e))
+    try:
+        upd(j,2,"Recibiendo PDF","Archivo recibido",status="running")
+        doc=fitz.open(stream=data,filetype="pdf"); pages=len(doc); allp=[]
+        for i,page in enumerate(doc,1):
+            upd(j,5+int((i-1)/max(pages,1)*45),f"IA visual · pagina {i}/{pages}","Qwen3-VL analiza imagenes")
+            found=[]
+            try: found=vision_identify(page_png(page))
+            except Exception as e:
+                txt=extract_text(page)
+                if txt:
+                    try: found=text_identify(txt)
+                    except Exception: found=[]
+            for x in found: x["page"]=i; allp.append(x)
+        doc.close()
+        m={}
+        for p in allp:
+            k=(p["name"]+" "+p.get("brand","")+" "+p.get("variant","")).lower()
+            if k not in m: m[k]=p.copy(); m[k]["pages"]=[p["page"]]
+            elif p["page"] not in m[k]["pages"]: m[k]["pages"].append(p["page"])
+        items=list(m.values()); res=[]
+        for i,p in enumerate(items,1):
+            upd(j,52+int((i-1)/max(len(items),1)*43),f"Buscando {i}/{len(items)}","Fragrantica + imagen Google · "+p["name"])
+            try: res.append(enrich(p))
+            except Exception: p.update({"found":False,"fragrantica_url":"","fragrantica_image_url":"","matched_title":"","image_url":""}); res.append(p)
+        result={"products":res,"stats":{"pages":pages,"detected":len(allp),"unique":len(res),"found":sum(x.get("found",False) for x in res)}}
+        with L: J[j].update(status="done",percent=100,stage="Completado",detail="Analisis terminado",result=result)
+    except Exception as e:
+        with L: J[j].update(status="error",percent=100,stage="Error",detail=str(e))
+
+def download_image(url):
+    if not url: return None
+    try:
+        r=requests.get(url,headers={"User-Agent":"Mozilla/5.0"},timeout=15); r.raise_for_status()
+        im=Image.open(io.BytesIO(r.content)).convert("RGB")
+        return im
+    except Exception: return None
+
+def make_pdf(result,path):
+    c=canvas.Canvas(path,pagesize=A4); W,H=A4
+    products=result.get("products",[])
+    margin=28; gap=12; cols=2; rows=4
+    cw=(W-2*margin-gap)/cols; ch=(H-2*margin-70-(rows-1)*gap)/rows
+    for idx,p in enumerate(products):
+        slot=idx%8
+        if slot==0:
+            c.setFont("Helvetica-Bold",16); c.drawString(margin,H-30,"ZUASH · CATÁLOGO DE PERFUMES")
+            c.setFont("Helvetica",8); c.drawRightString(W-margin,H-30,"8 por hoja")
+        col=slot%2; row=slot//2; x=margin+col*(cw+gap); y=H-58-(row+1)*ch-row*gap
+        c.roundRect(x,y,cw,ch,8,stroke=1,fill=0)
+        im=download_image(p.get("image_url") or p.get("fragrantica_image_url",""))
+        if im:
+            iw,ih=im.size; scale=min((cw-18)/iw,(ch-55)/ih,1.0); dw,dh=iw*scale,ih*scale
+            bio=io.BytesIO(); im.save(bio,format="JPEG",quality=88); bio.seek(0)
+            c.drawImage(bio,x+(cw-dw)/2,y+30+(ch-55-dh)/2,width=dw,height=dh,preserveAspectRatio=True,mask="auto")
+        c.setFont("Helvetica-Bold",9); c.drawCentredString(x+cw/2,y+17,p["name"][:52])
+        if p.get("brand") or p.get("variant"):
+            c.setFont("Helvetica",7); c.drawCentredString(x+cw/2,y+7," · ".join(v for v in [p.get("brand",""),p.get("variant","")] if v)[:68])
+        if slot==7 or idx==len(products)-1: c.showPage()
+    c.save()
+
 @app.get("/")
 def root(): return FileResponse("web/index.html")
+
 @app.get("/api/health")
 def health():
- try: ms=[x.get("name") for x in ollama.Client(host=HOST).list().get("models",[])]; ok=True
- except Exception: ms=[]; ok=False
- return {"ok":True,"ollama":ok,"qwen_model":MODEL,"models":ms}
+    try: models=[x.get("name") for x in ollama.Client(host=HOST).list().get("models",[])]; ok=True
+    except Exception: models=[]; ok=False
+    return {"ok":True,"ollama":ok,"text_model":TEXT_MODEL,"vision_model":VISION_MODEL,"models":models}
+
 @app.post("/api/analyze-pdf")
 async def analyze(file:UploadFile=File(...)):
- if not file.filename.lower().endswith(".pdf"): raise HTTPException(400,"Solo PDF")
- data=await file.read(); j=uuid.uuid4().hex
- with L: J[j]={"status":"queued","percent":0,"stage":"Preparando","detail":"","started_at":time.time()}
- threading.Thread(target=run,args=(j,data),daemon=True).start(); return {"job_id":j}
+    if not file.filename.lower().endswith(".pdf"): raise HTTPException(400,"Solo PDF")
+    data=await file.read(); j=uuid.uuid4().hex
+    with L: J[j]={"status":"queued","percent":0,"stage":"Preparando","detail":"","started_at":time.time()}
+    threading.Thread(target=run,args=(j,data),daemon=True).start(); return {"job_id":j}
+
 @app.get("/api/analyze-pdf/{j}")
 def status(j:str):
- with L: x=dict(J.get(j,{}))
- if not x: raise HTTPException(404,"Trabajo no encontrado")
- x["elapsed_seconds"]=round(time.time()-x["started_at"],1); return x
+    with L: x=dict(J.get(j,{}))
+    if not x: raise HTTPException(404,"Trabajo no encontrado")
+    x["elapsed_seconds"]=round(time.time()-x["started_at"],1); return x
+
+@app.post("/api/generate-pdf")
+async def generate_pdf(payload:dict):
+    result=payload.get("result")
+    if not result or not result.get("products"): raise HTTPException(400,"No hay perfumes para generar")
+    name="ZUASH_catalogo_"+uuid.uuid4().hex[:8]+".pdf"; path=os.path.join(OUT,name)
+    make_pdf(result,path); return {"filename":name,"url":"/api/generated/"+name}
+
+@app.get("/api/generated/{name}")
+def generated(name:str):
+    safe=os.path.basename(name); path=os.path.join(OUT,safe)
+    if not os.path.isfile(path): raise HTTPException(404,"PDF no encontrado")
+    return FileResponse(path,media_type="application/pdf",filename=safe)
