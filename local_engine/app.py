@@ -167,7 +167,7 @@ def root(): return FileResponse("web/index.html")
 def health():
     try: models=[x.get("name") for x in ollama.Client(host=HOST).list().get("models",[])]; ok=True
     except Exception: models=[]; ok=False
-    return {"ok":True,"ollama":ok,"text_model":TEXT_MODEL,"vision_model":VISION_MODEL,"models":models}
+    return {"ok":True,"ollama":ok,"text_model":TEXT_MODEL,"vision_model":VISION_MODEL,"vision_ready":VISION_MODEL in models,"text_ready":TEXT_MODEL in models,"models":models}
 
 @app.post("/api/analyze-pdf")
 async def analyze(file:UploadFile=File(...)):
