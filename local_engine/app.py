@@ -56,31 +56,46 @@ def extract_text(page):
     return " ".join(w[4] for w in words if w[4].strip()).strip(),False
 
 def extract_document(doc,j):
+    # HIBRIDO: conserva la capa de texto del PDF y ADEMAS ejecuta OCR sobre
+    # la pagina completa. Esto cubre catalogos donde el nombre del perfume
+    # esta dibujado dentro de una imagen aunque exista texto basura oculto.
     pages=[]; total=len(doc); total_chars=0; empty_pages=[]; ocr_pages=[]
     tess=setup_tesseract()
     for i,page in enumerate(doc,1):
-        text,_=extract_text(page)
+        native,_=extract_text(page)
+        text=native.strip()
         used_ocr=False
-        if len(text.strip()) < 30 and tess:
+        ocr_text=""
+        if tess:
             try:
-                upd(j,5+int((i-1)/max(total,1)*25),f"OCR · pagina {i}/{total}",
-                    f"Pagina con {len(text)} caracteres; intentando OCR")
+                pct=5+int((i-1)/max(total,1)*30)
+                upd(j,pct,f"OCR · pagina {i}/{total}",
+                    f"Reconociendo texto de imagen · {len(native)} caracteres nativos")
+                print(f"[{pct:3d}%] OCR pagina {i}/{total}",flush=True)
                 tp=page.get_textpage_ocr(language=OCR_LANG,dpi=OCR_DPI,full=True)
                 ocr_text=page.get_text("text",textpage=tp,sort=True).strip()
-                if len(ocr_text)>len(text):
-                    text=ocr_text
+                if ocr_text:
                     used_ocr=True
                     ocr_pages.append(i)
             except Exception as e:
                 print(f"[OCR] pagina {i}/{total}: {e}",flush=True)
+
+        # No descartamos el texto nativo: Qwen recibe ambas fuentes y puede
+        # decidir cual contiene el nombre real del perfume.
+        if ocr_text and native.strip():
+            text="[TEXTO PDF]\n"+native.strip()+"\n[OCR DE IMAGEN]\n"+ocr_text
+        elif ocr_text:
+            text="[OCR DE IMAGEN]\n"+ocr_text
+        elif native.strip():
+            text="[TEXTO PDF]\n"+native.strip()
+
         total_chars+=len(text)
-        if not text: empty_pages.append(i)
-        pages.append({"page":i,"text":text,"ocr":used_ocr})
+        if len(text.strip())==0: empty_pages.append(i)
+        pages.append({"page":i,"text":text,"ocr":used_ocr,"native_chars":len(native),"ocr_chars":len(ocr_text)})
         pct=5+int(i/max(total,1)*30)
         upd(j,pct,f"Extrayendo texto · pagina {i}/{total}",
             f"{len(text)} caracteres" + (" · OCR" if used_ocr else ""))
-        print(f"[{pct:3d}%] Extrayendo pagina {i}/{total} · {len(text)} caracteres"
-              + (" · OCR" if used_ocr else ""),flush=True)
+        print(f"[{pct:3d}%] Pagina {i}/{total} · nativo {len(native)} · OCR {len(ocr_text)}",flush=True)
     return pages,total_chars,empty_pages,ocr_pages,tess
 
 def clean(s):
@@ -89,22 +104,50 @@ def clean(s):
     return re.sub(r"\s+"," ",s).strip(" -:;,.|")
 
 def parse_json(raw):
-    raw=raw.replace(chr(96),"")
-    m=re.search(r'\{\s*"perfumes"\s*:\s*\[.*?\]\s*\}',raw,re.S)
-    if not m: raise ValueError("Qwen no devolvio JSON")
-    data=json.loads(m.group())
+    # Qwen puede envolver el JSON en markdown o texto introductorio.
+    # Extraemos el objeto JSON de forma tolerante antes de parsearlo.
+    raw=str(raw).strip()
+    candidates=[raw, re.sub(r"^\\s*json\\s*|^\\s*|\\s*$","",raw,flags=re.I)]
+    start=raw.find('{"perfumes"')
+    if start>=0: candidates.append(raw[start:])
+    data=None
+    for candidate in candidates:
+        try:
+            decoder=json.JSONDecoder()
+            obj,_=decoder.raw_decode(candidate)
+            if isinstance(obj,dict) and isinstance(obj.get("perfumes"),list):
+                data=obj; break
+        except Exception: pass
+    if data is None:
+        m=re.search(r'\{\s*"perfumes"\s*:\s*\[.*\]\s*\}',raw,re.S)
+        if m:
+            try: data=json.loads(m.group())
+            except Exception: data=None
+    if data is None: raise ValueError("Qwen no devolvio JSON valido: "+raw[:500])
     out=[]; seen=set()
     for x in data.get("perfumes",[]):
+        if not isinstance(x,dict): continue
         n,b,v=clean(x.get("name","")),clean(x.get("brand","")),clean(x.get("variant",""))
         if not n or len(n)>120: continue
         if any(w in n.lower() for w in ["instagram","whatsapp","proveedor","precio","catalogo"]): continue
-        k=(n+" "+b+" "+v).lower()
+        k=re.sub(r"\\s+"," ",(n+" "+b+" "+v).lower()).strip()
         if k in seen: continue
-        seen.add(k); out.append({"name":n,"brand":b,"variant":v,"confidence":float(x.get("confidence",0) or 0)})
+        seen.add(k)
+        try: conf=float(x.get("confidence",0) or 0)
+        except Exception: conf=0
+        out.append({"name":n,"brand":b,"variant":v,"confidence":conf})
     return out
 
 def text_identify(text):
-    r=ollama.Client(host=HOST).chat(model=TEXT_MODEL,messages=[{"role":"user","content":TEXT_PROMPT+"\n\n"+text[:30000]}],options={"temperature":0})
+    prompt=TEXT_PROMPT+"""\n\nREGLAS IMPORTANTES:
+- El texto puede contener dos fuentes: [TEXTO PDF] y [OCR DE IMAGEN].
+- Si el nombre aparece solamente en OCR, SIGUE SIENDO VALIDO.
+- No necesitas que exista una capa de texto PDF.
+- Analiza cada [PAGINA N] y devuelve los perfumes de todas las paginas.
+- No devuelvas [] simplemente porque el texto tenga errores de OCR; reconstruye nombres evidentes de marcas/perfumes.
+- Si una pagina contiene un nombre de perfume claro, incluyelo aunque la marca este vacia.
+\n\n"""
+    r=ollama.Client(host=HOST).chat(model=TEXT_MODEL,messages=[{"role":"user","content":prompt+text[:30000]}],options={"temperature":0})
     return parse_json(r["message"]["content"])
 
 def page_png(page):
