@@ -22,7 +22,7 @@ def upd(j,p,s,d="",**x):
     with L:
         if j in J: J[j].update(percent=int(max(0,min(100,p))),stage=s,detail=d,**x)
 
-OCR_LANG=os.getenv("OCR_LANG","eng")
+OCR_LANG=os.getenv("OCR_LANG","eng+spa")
 OCR_DPI=int(os.getenv("OCR_DPI","200"))
 TESSERACT_CMD=os.getenv("TESSERACT_CMD","").strip()
 
@@ -153,16 +153,20 @@ def text_identify(text):
 - Si una pagina contiene un nombre de perfume claro, incluyelo aunque la marca este vacia.
 \n\n"""
     client=ollama.Client(host=HOST)
-    r=client.chat(model=TEXT_MODEL,messages=[{"role":"user","content":prompt+text[:30000]}],options={"temperature":0})
-    found=parse_json(r["message"]["content"])
+    r=client.chat(model=TEXT_MODEL,messages=[{"role":"user","content":prompt+text[:30000]}],options={"temperature":0},format="json",think=False)
+    raw=r.get("message",{}).get("content","")
+    print("[QWEN] respuesta:",raw[:1200].replace("\\n"," "),flush=True)
+    found=parse_json(raw)
     if found: return found
     retry="""Extrae nombres de perfumes del texto OCR/PDF siguiente. Busca marcas y nombres de fragancias aunque tengan errores menores de OCR. Conserva numeros y variantes como EDT, EDP, Parfum y Elixir. Ignora precios, telefonos, Instagram, WhatsApp, SKU y nombres de proveedores. Devuelve SOLO JSON con esta forma:
 {"perfumes":[{"name":"","brand":"","variant":"","confidence":0,"pages":[1]}]}
 No devuelvas un arreglo vacio si existe al menos un nombre de perfume reconocible.
 TEXTO:
 """+text[:30000]
-    r2=client.chat(model=TEXT_MODEL,messages=[{"role":"user","content":retry}],options={"temperature":0})
-    return parse_json(r2["message"]["content"])
+    r2=client.chat(model=TEXT_MODEL,messages=[{"role":"user","content":retry}],options={"temperature":0},format="json",think=False)
+    raw2=r2.get("message",{}).get("content","")
+    print("[QWEN RETRY] respuesta:",raw2[:1200].replace("\\n"," "),flush=True)
+    return parse_json(raw2)
 
 def page_png(page):
     pix=page.get_pixmap(matrix=fitz.Matrix(1.5,1.5),alpha=False)
