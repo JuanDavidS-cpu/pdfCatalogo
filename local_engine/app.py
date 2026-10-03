@@ -107,7 +107,7 @@ def parse_json(raw):
     # Qwen puede envolver el JSON en markdown o texto introductorio.
     # Extraemos el objeto JSON de forma tolerante antes de parsearlo.
     raw=str(raw).strip()
-    candidates=[raw, re.sub(r"^\\s*json\\s*|^\\s*|\\s*$","",raw,flags=re.I)]
+    candidates=[raw, re.sub(r"^\s*json\s*|^\s*|\s*$","",raw,flags=re.I)]
     start=raw.find('{"perfumes"')
     if start>=0: candidates.append(raw[start:])
     data=None
@@ -130,7 +130,7 @@ def parse_json(raw):
         n,b,v=clean(x.get("name","")),clean(x.get("brand","")),clean(x.get("variant",""))
         if not n or len(n)>120: continue
         if any(w in n.lower() for w in ["instagram","whatsapp","proveedor","precio","catalogo"]): continue
-        k=re.sub(r"\\s+"," ",(n+" "+b+" "+v).lower()).strip()
+        k=re.sub(r"\s+"," ",(n+" "+b+" "+v).lower()).strip()
         if k in seen: continue
         seen.add(k)
         try: conf=float(x.get("confidence",0) or 0)
