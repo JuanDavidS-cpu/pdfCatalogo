@@ -16,7 +16,7 @@ app=FastAPI(title="ZUASH PDF Text AI Engine",version="5.0.0")
 app.mount("/web",StaticFiles(directory="web"),name="web")
 J={}; L=threading.Lock(); OUT=os.path.join(os.path.dirname(__file__),"generated"); os.makedirs(OUT,exist_ok=True)
 
-TEXT_PROMPT="""Analiza SOLO el texto extraido de un catalogo de perfumes. Cada bloque [PAGINA N] puede contener UNO O VARIOS perfumes. Identifica todos los nombres de perfumes/fragrancias vendibles, incluso si el texto viene de OCR y contiene errores menores. El nombre suele aparecer cerca del producto y puede estar en una linea separada. Ignora precios, SKU, telefonos, Instagram, WhatsApp, direcciones, proveedores, descuentos, tamanos y publicidad. Conserva numeros legitimos del nombre (212, 1 Million, 9PM) y variantes EDT, EDP, Elixir, Parfum. Corrige solo errores evidentes de OCR; no inventes. Si no puedes determinar la marca, deja brand vacio pero conserva el nombre. Devuelve TODOS los candidatos razonables y SOLO JSON: {"perfumes":[{"name":"","brand":"","variant":"","confidence":0}]}"""
+TEXT_PROMPT="""Analiza SOLO el texto extraido de un catalogo de perfumes. Cada bloque [PAGINA N] puede contener UNO O VARIOS perfumes. Identifica todos los nombres de perfumes/fragrancias vendibles, incluso si el texto viene de OCR y contiene errores menores. El nombre suele aparecer cerca del producto y puede estar en una linea separada. Ignora precios, SKU, telefonos, Instagram, WhatsApp, direcciones, proveedores, descuentos, tamanos y publicidad. Conserva numeros legitimos del nombre (212, 1 Million, 9PM) y variantes EDT, EDP, Elixir, Parfum. Corrige solo errores evidentes de OCR; no inventes. Si no puedes determinar la marca, deja brand vacio pero conserva el nombre. Devuelve TODOS los candidatos razonables y SOLO JSON: {"perfumes":[{"name":"","brand":"","variant":"","confidence":0,"pages":[1]}]}"""
 
 def upd(j,p,s,d="",**x):
     with L:
@@ -128,6 +128,11 @@ def parse_json(raw):
     for x in data.get("perfumes",[]):
         if not isinstance(x,dict): continue
         n,b,v=clean(x.get("name","")),clean(x.get("brand","")),clean(x.get("variant",""))
+        raw_pages=x.get("pages",x.get("page",[]))
+        if isinstance(raw_pages,int): raw_pages=[raw_pages]
+        if not isinstance(raw_pages,list): raw_pages=[]
+        try: pages=[int(v) for v in raw_pages if int(v)>0]
+        except Exception: pages=[]
         if not n or len(n)>120: continue
         if any(w in n.lower() for w in ["instagram","whatsapp","proveedor","precio","catalogo"]): continue
         k=re.sub(r"\s+"," ",(n+" "+b+" "+v).lower()).strip()
@@ -135,7 +140,7 @@ def parse_json(raw):
         seen.add(k)
         try: conf=float(x.get("confidence",0) or 0)
         except Exception: conf=0
-        out.append({"name":n,"brand":b,"variant":v,"confidence":conf})
+        out.append({"name":n,"brand":b,"variant":v,"confidence":conf,"pages":pages})
     return out
 
 def text_identify(text):
@@ -147,8 +152,17 @@ def text_identify(text):
 - No devuelvas [] simplemente porque el texto tenga errores de OCR; reconstruye nombres evidentes de marcas/perfumes.
 - Si una pagina contiene un nombre de perfume claro, incluyelo aunque la marca este vacia.
 \n\n"""
-    r=ollama.Client(host=HOST).chat(model=TEXT_MODEL,messages=[{"role":"user","content":prompt+text[:30000]}],options={"temperature":0})
-    return parse_json(r["message"]["content"])
+    client=ollama.Client(host=HOST)
+    r=client.chat(model=TEXT_MODEL,messages=[{"role":"user","content":prompt+text[:30000]}],options={"temperature":0})
+    found=parse_json(r["message"]["content"])
+    if found: return found
+    retry="""Extrae nombres de perfumes del texto OCR/PDF siguiente. Busca marcas y nombres de fragancias aunque tengan errores menores de OCR. Conserva numeros y variantes como EDT, EDP, Parfum y Elixir. Ignora precios, telefonos, Instagram, WhatsApp, SKU y nombres de proveedores. Devuelve SOLO JSON con esta forma:
+{"perfumes":[{"name":"","brand":"","variant":"","confidence":0,"pages":[1]}]}
+No devuelvas un arreglo vacio si existe al menos un nombre de perfume reconocible.
+TEXTO:
+"""+text[:30000]
+    r2=client.chat(model=TEXT_MODEL,messages=[{"role":"user","content":retry}],options={"temperature":0})
+    return parse_json(r2["message"]["content"])
 
 def page_png(page):
     pix=page.get_pixmap(matrix=fitz.Matrix(1.5,1.5),alpha=False)
@@ -222,12 +236,15 @@ def run(j,data):
             except Exception as e:
                 found=[]; upd(j,40,f"Qwen3 · bloque {ci}",str(e))
             for x in found:
-                page_nums=[]
-                for p in pages:
-                    terms=[x["name"],x.get("variant",""),x.get("brand","")]
-                    if any(tok and len(tok)>2 and tok.lower() in p["text"].lower() for tok in terms):
-                        page_nums.append(p["page"])
-                x["pages"]=page_nums or [1]; x["page"]=x["pages"][0]; allp.append(x)
+                page_nums=[n for n in x.get("pages",[]) if 1 <= n <= len(pages)]
+                if not page_nums:
+                    for p in pages:
+                        terms=[x["name"],x.get("variant",""),x.get("brand","")]
+                        if any(tok and len(tok)>2 and tok.lower() in p["text"].lower() for tok in terms):
+                            page_nums.append(p["page"])
+                x["pages"]=sorted(set(page_nums)) or [1]
+                x["page"]=x["pages"][0]
+                allp.append(x)
 
         # Dedupe global del documento.
         m={}
