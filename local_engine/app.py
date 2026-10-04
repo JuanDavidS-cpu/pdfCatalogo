@@ -329,7 +329,11 @@ def google_image(q):
 def enrich(p):
     q=" ".join(x for x in [p["name"],p.get("variant",""),p.get("brand","")] if x)
     fr=fragrantica(q); p.update(fr)
-    p["image_url"]=google_image(p.get("matched_title") or q) or p.get("fragrantica_image_url","")
+    # El recorte visual local es la imagen principal; la imagen externa queda como referencia.
+    if not p.get("crop_url"):
+        p["image_url"]=google_image(p.get("matched_title") or q) or p.get("fragrantica_image_url","")
+    else:
+        p["external_image_url"]=google_image(p.get("matched_title") or q) or p.get("fragrantica_image_url","")
     return p
 
 def run(j,data):
