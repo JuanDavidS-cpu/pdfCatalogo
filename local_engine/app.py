@@ -104,70 +104,122 @@ def clean(s):
     return re.sub(r"\s+"," ",s).strip(" -:;,.|")
 
 def parse_json(raw):
-    # Qwen puede envolver el JSON en markdown o texto introductorio.
-    # Extraemos el objeto JSON de forma tolerante antes de parsearlo.
-    raw=str(raw).strip()
-    candidates=[raw, re.sub(r"^\s*json\s*|^\s*|\s*$","",raw,flags=re.I)]
-    start=raw.find('{"perfumes"')
-    if start>=0: candidates.append(raw[start:])
+    """Parsea respuestas JSON de Qwen con tolerancia a wrappers y claves alternativas."""
+    raw=str(raw or "").strip()
+    if not raw:
+        raise ValueError("Qwen devolvio una respuesta vacia")
+    candidates=[raw]
+    cleaned=re.sub(r"^\s*```(?:json)?\s*|\s*```\s*$","",raw,flags=re.I|re.S).strip()
+    if cleaned!=raw: candidates.append(cleaned)
+    for key in ("perfumes","products","items","results"):
+        pos=raw.find("{"+chr(34)+key+chr(34))
+        if pos>=0: candidates.append(raw[pos:])
     data=None
     for candidate in candidates:
         try:
-            decoder=json.JSONDecoder()
-            obj,_=decoder.raw_decode(candidate)
-            if isinstance(obj,dict) and isinstance(obj.get("perfumes"),list):
-                data=obj; break
-        except Exception: pass
+            obj,_=json.JSONDecoder().raw_decode(candidate)
+            if isinstance(obj,dict):
+                arr=None
+                for key in ("perfumes","products","items","results"):
+                    if isinstance(obj.get(key),list):
+                        arr=obj[key]; break
+                if arr is not None:
+                    data={"perfumes":arr}; break
+        except Exception:
+            pass
     if data is None:
-        m=re.search(r'\{\s*"perfumes"\s*:\s*\[.*\]\s*\}',raw,re.S)
+        m=re.search(r'\{\s*"?(?:perfumes|products|items|results)"?\s*:\s*\[.*?\]\s*\}',raw,re.S|re.I)
         if m:
-            try: data=json.loads(m.group())
-            except Exception: data=None
-    if data is None: raise ValueError("Qwen no devolvio JSON valido: "+raw[:500])
+            try:
+                obj=json.loads(m.group())
+                arr=next((obj.get(k) for k in ("perfumes","products","items","results") if isinstance(obj.get(k),list)),None)
+                if arr is not None: data={"perfumes":arr}
+            except Exception:
+                pass
+    if data is None:
+        raise ValueError("Qwen no devolvio JSON valido: "+raw[:500])
     out=[]; seen=set()
-    for x in data.get("perfumes",[]):
+    for x in data["perfumes"]:
+        if isinstance(x,str): x={"name":x}
         if not isinstance(x,dict): continue
-        n,b,v=clean(x.get("name","")),clean(x.get("brand","")),clean(x.get("variant",""))
+        n=clean(x.get("name") or x.get("perfume") or x.get("title") or "")
+        b=clean(x.get("brand") or x.get("marca") or "")
+        v=clean(x.get("variant") or x.get("version") or "")
         raw_pages=x.get("pages",x.get("page",[]))
         if isinstance(raw_pages,int): raw_pages=[raw_pages]
         if not isinstance(raw_pages,list): raw_pages=[]
-        try: pages=[int(v) for v in raw_pages if int(v)>0]
-        except Exception: pages=[]
+        pages=[]
+        for pv in raw_pages:
+            try:
+                if int(pv)>0: pages.append(int(pv))
+            except Exception: pass
         if not n or len(n)>120: continue
-        if any(w in n.lower() for w in ["instagram","whatsapp","proveedor","precio","catalogo"]): continue
+        low=n.lower()
+        junk=("instagram","whatsapp","proveedor","precio","catalogo","telefono","tel.","contacto","www.")
+        if any(w in low for w in junk): continue
+        if re.fullmatch(r"[\d\s+().-]{5,}",n): continue
         k=re.sub(r"\s+"," ",(n+" "+b+" "+v).lower()).strip()
         if k in seen: continue
         seen.add(k)
-        try: conf=float(x.get("confidence",0) or 0)
+        try: conf=float(x.get("confidence",x.get("confianza",0)) or 0)
         except Exception: conf=0
-        out.append({"name":n,"brand":b,"variant":v,"confidence":conf,"pages":pages})
+        out.append({"name":n,"brand":b,"variant":v,"confidence":conf,"pages":sorted(set(pages))})
     return out
 
-def text_identify(text):
-    prompt=TEXT_PROMPT+"""\n\nREGLAS IMPORTANTES:
-- El texto puede contener dos fuentes: [TEXTO PDF] y [OCR DE IMAGEN].
-- Si el nombre aparece solamente en OCR, SIGUE SIENDO VALIDO.
-- No necesitas que exista una capa de texto PDF.
-- Analiza cada [PAGINA N] y devuelve los perfumes de todas las paginas.
-- No devuelvas [] simplemente porque el texto tenga errores de OCR; reconstruye nombres evidentes de marcas/perfumes.
-- Si una pagina contiene un nombre de perfume claro, incluyelo aunque la marca este vacia.
-\n\n"""
-    client=ollama.Client(host=HOST)
-    r=client.chat(model=TEXT_MODEL,messages=[{"role":"user","content":prompt+text[:30000]}],options={"temperature":0},format="json",think=False)
-    raw=r.get("message",{}).get("content","")
-    print("[QWEN] respuesta:",raw[:1200].replace("\\n"," "),flush=True)
-    found=parse_json(raw)
-    if found: return found
-    retry="""Extrae nombres de perfumes del texto OCR/PDF siguiente. Busca marcas y nombres de fragancias aunque tengan errores menores de OCR. Conserva numeros y variantes como EDT, EDP, Parfum y Elixir. Ignora precios, telefonos, Instagram, WhatsApp, SKU y nombres de proveedores. Devuelve SOLO JSON con esta forma:
-{"perfumes":[{"name":"","brand":"","variant":"","confidence":0,"pages":[1]}]}
-No devuelvas un arreglo vacio si existe al menos un nombre de perfume reconocible.
-TEXTO:
-"""+text[:30000]
-    r2=client.chat(model=TEXT_MODEL,messages=[{"role":"user","content":retry}],options={"temperature":0},format="json",think=False)
-    raw2=r2.get("message",{}).get("content","")
-    print("[QWEN RETRY] respuesta:",raw2[:1200].replace("\\n"," "),flush=True)
-    return parse_json(raw2)
+def page_candidates(text):
+    """Reduce OCR ruidoso a lineas con alta probabilidad de contener nombres."""
+    raw=re.sub(r"\r","",str(text or ""))
+    lines=[]
+    for line in raw.split("\n"):
+        line=re.sub(r"\s+"," ",line).strip(" -|:;,. ")
+        if not line or len(line)<2 or len(line)>100: continue
+        low=line.lower()
+        if re.search(r"https?://|www\.|@[a-z0-9_]+",low): continue
+        if re.search(r"\b(whatsapp|instagram|facebook|tiktok|telegram|proveedor|distribuidor|contacto|telefono|tel)\b",low): continue
+        digits=sum(c.isdigit() for c in line)
+        letters=sum(c.isalpha() for c in line)
+        if letters<3: continue
+        if digits>=6 and digits>letters: continue
+        if re.fullmatch(r"[\d\W_]+",line): continue
+        lines.append(line)
+    uniq=[]; seen=set()
+    for line in lines:
+        k=line.lower()
+        if k not in seen:
+            seen.add(k); uniq.append(line)
+    return uniq[:35]
 
+def text_identify(text):
+    prompt="""Eres un extractor de nombres de perfumes. Analiza SOLO el texto OCR/PDF.
+Cada [PAGINA N] es una pagina independiente. Identifica nombres comerciales de perfumes/fragrancias que aparezcan realmente en el texto. El OCR puede tener errores de una o dos letras: corrige solo errores evidentes. Conserva numeros legitimos como 212, 9PM, 1 Million y variantes EDT, EDP, Parfum, Elixir, Intense, Absolu, etc.
+IGNORA precios, telefonos, codigos SKU, Instagram, WhatsApp, direcciones, nombres de proveedores, descuentos, mililitros y publicidad.
+Si solo puedes determinar el nombre y no la marca, deja brand vacio. NO inventes perfumes que no aparezcan.
+Devuelve TODOS los candidatos razonables. Devuelve SOLO este JSON:
+{"perfumes":[{"name":"","brand":"","variant":"","confidence":0.0,"pages":[1]}]}
+La confianza debe estar entre 0 y 1.
+"""
+    client=ollama.Client(host=HOST)
+    diagnostics=[]
+    try:
+        r=client.chat(model=TEXT_MODEL,messages=[{"role":"user","content":prompt+"\n\n"+text}],options={"temperature":0},format="json",think=False,keep_alive="10m")
+        raw=r.get("message",{}).get("content","")
+        diagnostics.append(("main",raw[:1000]))
+        found=parse_json(raw)
+        if found: return found,diagnostics
+    except Exception as e:
+        diagnostics.append(("main_error",str(e)))
+    retry="""Extrae SOLO nombres de perfumes del siguiente texto OCR. Devuelve JSON exacto {"perfumes":[{"name":"","brand":"","variant":"","confidence":0.0,"pages":[1]}]}.
+Una linea que sea claramente un nombre de fragancia cuenta aunque la marca no sea visible. Ignora numeros de telefono, precios, redes sociales, SKU y proveedores. Corrige errores OCR evidentes pero no inventes nombres.
+TEXTO:
+"""+text
+    try:
+        r2=client.chat(model=TEXT_MODEL,messages=[{"role":"user","content":retry}],options={"temperature":0},format="json",think=False,keep_alive="10m")
+        raw2=r2.get("message",{}).get("content","")
+        diagnostics.append(("retry",raw2[:1000]))
+        return parse_json(raw2),diagnostics
+    except Exception as e:
+        diagnostics.append(("retry_error",str(e)))
+        return [],diagnostics
 def page_png(page):
     pix=page.get_pixmap(matrix=fitz.Matrix(1.5,1.5),alpha=False)
     return pix.tobytes("png")
@@ -221,34 +273,60 @@ def run(j,data):
         upd(j,35,"Texto extraido",f"{total_chars:,} caracteres · {len(ocr_pages)} paginas con OCR · {len(empty_pages)} paginas sin texto")
         print(f"[ 35%] Texto listo · {total_chars:,} caracteres · OCR {len(ocr_pages)}/{len(pages)} paginas",flush=True)
 
-        # Todo el PDF se analiza como texto. Se usan bloques de texto
-        # para conservar el contexto de paginas sin analizar imagenes.
-        chunks=[]; current=[]; chars=0; LIMIT=18000
+        # PRIMER PASO DE IDENTIFICACION: resumimos OCR por pagina antes de Qwen.
+        compact_pages=[]
         for p in pages:
-            piece=f"\n[PAGINA {p['page']}]\n{p['text']}\n"
+            cand=page_candidates(p["text"])
+            compact_pages.append(f"\n[PAGINA {p['page']}]\n"+"\n".join(cand))
+        chunks=[]; current=[]; chars=0; LIMIT=6500
+        for piece in compact_pages:
             if current and chars+len(piece)>LIMIT:
                 chunks.append(current); current=[]; chars=0
             current.append(piece); chars+=len(piece)
         if current: chunks.append(current)
 
-        allp=[]
+        allp=[]; qwen_diag=[]
         for ci,chunk in enumerate(chunks,1):
             pct=38+int((ci-1)/max(len(chunks),1)*24)
-            upd(j,pct,f"Qwen3 · bloque {ci}/{len(chunks)}","Analizando texto extraido del PDF")
+            upd(j,pct,f"Qwen3 · bloque {ci}/{len(chunks)}","Identificando nombres a partir del OCR")
             print(f"[{pct:3d}%] Qwen3 · bloque {ci}/{len(chunks)}",flush=True)
-            try: found=text_identify("".join(chunk))
+            try:
+                found,diag=text_identify("".join(chunk))
+                qwen_diag.extend([{"block":ci,"type":t,"response":v} for t,v in diag])
             except Exception as e:
-                found=[]; upd(j,40,f"Qwen3 · bloque {ci}",str(e))
+                found=[]; qwen_diag.append({"block":ci,"type":"exception","response":str(e)})
+                print(f"[QWEN ERROR] bloque {ci}: {e}",flush=True)
             for x in found:
                 page_nums=[n for n in x.get("pages",[]) if 1 <= n <= len(pages)]
                 if not page_nums:
+                    terms=[x["name"],x.get("variant",""),x.get("brand","")]
                     for p in pages:
-                        terms=[x["name"],x.get("variant",""),x.get("brand","")]
                         if any(tok and len(tok)>2 and tok.lower() in p["text"].lower() for tok in terms):
                             page_nums.append(p["page"])
-                x["pages"]=sorted(set(page_nums)) or [1]
-                x["page"]=x["pages"][0]
-                allp.append(x)
+                x["pages"]=sorted(set(page_nums))
+                if x["pages"]:
+                    x["page"]=x["pages"][0]
+                    allp.append(x)
+
+        # Segundo pase compacto si el primero no produjo ningun candidato.
+        if not allp:
+            print("[QWEN FALLBACK] No hubo candidatos; ejecutando segundo pase compacto",flush=True)
+            fallback=[]
+            for p in pages:
+                cand=page_candidates(p["text"])
+                if cand:
+                    fallback.append(f"[PAGINA {p['page']}] "+" | ".join(cand[:18]))
+            for start in range(0,len(fallback),8):
+                block="\n".join(fallback[start:start+8])
+                try:
+                    found,diag=text_identify(block)
+                    qwen_diag.extend([{"block":f"fallback-{start//8+1}","type":t,"response":v} for t,v in diag])
+                    for x in found:
+                        pages_found=[n for n in x.get("pages",[]) if 1<=n<=len(pages)]
+                        if pages_found:
+                            x["pages"]=sorted(set(pages_found)); x["page"]=x["pages"][0]; allp.append(x)
+                except Exception as e:
+                    qwen_diag.append({"block":f"fallback-{start//8+1}","type":"exception","response":str(e)})
 
         # Dedupe global del documento.
         m={}
@@ -266,7 +344,7 @@ def run(j,data):
             except Exception:
                 p.update({"found":False,"fragrantica_url":"","fragrantica_image_url":"","matched_title":"","image_url":""}); res.append(p)
 
-        result={"products":res,"stats":{"pages":len(pages),"characters":total_chars,"ocr_pages":ocr_pages,"ocr_available":bool(tess),"empty_text_pages":empty_pages,"detected":len(allp),"unique":len(res),"found":sum(x.get("found",False) for x in res)}}
+        result={"products":res,"stats":{"pages":len(pages),"characters":total_chars,"ocr_pages":ocr_pages,"ocr_available":bool(tess),"empty_text_pages":empty_pages,"detected":len(allp),"unique":len(res),"found":sum(x.get("found",False) for x in res),"qwen_blocks":len(qwen_diag),"qwen_diagnostics":qwen_diag[:40]}}
         print("[100%] Completado · analisis de texto terminado",flush=True)
         with L: J[j].update(status="done",percent=100,stage="Completado",detail="Analisis de texto + OCR terminado",result=result)
     except Exception as e:
