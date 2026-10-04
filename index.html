@@ -26,8 +26,8 @@ button.alt{background:#161616;color:#eee;border-color:#444}.grid{display:grid;gr
 <header><div class="logo">ZUASH</div><small>PREMIUM FRAGRANCE CATALOG STUDIO · HYBRID AI</small></header>
 <main>
 <h1>Generador de catálogo</h1>
-<div class="sub">PDF → comprensión visual → detección individual → identificación → imagen limpia → catálogo</div>
-<label class="drop"><b>Arrastra cualquier PDF aquí o haz clic para seleccionarlo</b><br><small>El sistema analiza cada página de forma independiente y nunca convierte una página completa en un producto.</small><input id="file" type="file" accept="application/pdf" hidden></label>
+<div class="sub">PDF → OCR → visión Qwen3-VL → detección individual → recorte → Fragrantica/Google → catálogo</div>
+<label class="drop"><b>Arrastra cualquier PDF aquí o haz clic para seleccionarlo</b><br><small>Qwen3-VL analiza cada página visualmente, detecta varios perfumes por página y recorta cada producto por separado. La inferencia local usa Ollama y aprovecha la GPU cuando está disponible.</small><input id="file" type="file" accept="application/pdf" hidden></label>
 <div id="tools" class="tools hide"><button id="add">＋ Añadir</button><button id="search" class="alt">🔎 Reintentar imágenes</button><span class="grow"></span><button id="pdf">Generar catálogo PDF</button></div>
 <div id="status" class="status"></div>
 <div id="stage" class="stage">
