@@ -336,7 +336,24 @@ def enrich(p):
         p["external_image_url"]=google_image(p.get("matched_title") or q) or p.get("fragrantica_image_url","")
     return p
 
-def ollama_runtime_info():\n    try:\n        r=requests.get(HOST+"/api/ps",timeout=5)\n        if not r.ok: return "Ollama conectado · no se pudo leer /api/ps"\n        data=r.json() or {}\n        models=data.get("models") or []\n        if not models: return "Ollama conectado · modelo aun no cargado"\n        parts=[]\n        for m in models:\n            proc=m.get("processor") or m.get("details",{}).get("processor") or "desconocido"\n            parts.append(str(proc))\n        return "Ollama · "+", ".join(parts)\n    except Exception as e:\n        return "Ollama · diagnostico no disponible: "+str(e)\n\n\ndef run(j,data):
+def ollama_runtime_info():
+    try:
+        r=requests.get(HOST+"/api/ps",timeout=5)
+        if not r.ok:
+            return "Ollama conectado · no se pudo leer /api/ps"
+        data=r.json() or {}
+        models=data.get("models") or []
+        if not models:
+            return "Ollama conectado · modelo aun no cargado"
+        parts=[]
+        for m in models:
+            proc=m.get("processor") or m.get("details",{}).get("processor") or "desconocido"
+            parts.append(str(proc))
+        return "Ollama · "+", ".join(parts)
+    except Exception as e:
+        return "Ollama · diagnostico no disponible: "+str(e)
+
+def run(j,data):
     try:
         upd(j,2,"Recibiendo PDF","Archivo recibido · "+ollama_runtime_info(),status="running")
         doc=fitz.open(stream=data,filetype="pdf")
