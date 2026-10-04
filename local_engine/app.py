@@ -12,7 +12,7 @@ from PIL import Image
 try: from ddgs import DDGS
 except Exception: DDGS=None
 
-TEXT_MODEL=os.getenv("QWEN_MODEL","qwen3-vl:8b").strip()
+TEXT_MODEL=os.getenv("QWEN_MODEL","qwen3-vl:8b-instruct").strip()
 HOST=os.getenv("OLLAMA_BASE_URL",os.getenv("OLLAMA_HOST","http://127.0.0.1:11434")).strip().rstrip("/")
 app=FastAPI(title="ZUASH PDF Text AI Engine",version="5.0.0")
 app.mount("/web",StaticFiles(directory="web"),name="web")
@@ -207,7 +207,7 @@ Devuelve SOLO JSON:
 "box":{"x":0,"y":0,"w":0,"h":0},"evidence":""}]}
 
 Texto OCR de apoyo:
-""" + str(page_text or "")[:7000]
+""" + str(page_text or "")[:4500]
 
     client=ollama.Client(host=HOST)
     diagnostics=[]
@@ -215,7 +215,7 @@ Texto OCR de apoyo:
         r=client.chat(
             model=TEXT_MODEL,
             messages=[{"role":"user","content":prompt,"images":[image_bytes]}],
-            options={"temperature":0},
+            options={"temperature":0,"num_predict":500},
             format="json",
             think=False,
             keep_alive="10m"
@@ -277,7 +277,7 @@ def parse_vision_json(raw):
 
 
 def page_png(page):
-    pix=page.get_pixmap(matrix=fitz.Matrix(2.0,2.0),alpha=False)
+    pix=page.get_pixmap(matrix=fitz.Matrix(float(os.getenv("VISION_SCALE","1.35")),float(os.getenv("VISION_SCALE","1.35"))),alpha=False)
     return pix.tobytes("png")
 
 
@@ -336,16 +336,16 @@ def enrich(p):
         p["external_image_url"]=google_image(p.get("matched_title") or q) or p.get("fragrantica_image_url","")
     return p
 
-def run(j,data):
+def ollama_runtime_info():\n    try:\n        r=requests.get(HOST+"/api/ps",timeout=5)\n        if not r.ok: return "Ollama conectado · no se pudo leer /api/ps"\n        data=r.json() or {}\n        models=data.get("models") or []\n        if not models: return "Ollama conectado · modelo aun no cargado"\n        parts=[]\n        for m in models:\n            proc=m.get("processor") or m.get("details",{}).get("processor") or "desconocido"\n            parts.append(str(proc))\n        return "Ollama · "+", ".join(parts)\n    except Exception as e:\n        return "Ollama · diagnostico no disponible: "+str(e)\n\n\ndef run(j,data):
     try:
-        upd(j,2,"Recibiendo PDF","Archivo recibido",status="running")
+        upd(j,2,"Recibiendo PDF","Archivo recibido · "+ollama_runtime_info(),status="running")
         doc=fitz.open(stream=data,filetype="pdf")
         pages,total_chars,empty_pages,ocr_pages,tess=extract_document(doc,j)
         if total_chars==0 and not tess:
             raise RuntimeError("El PDF no tiene capa de texto y no se encontro Tesseract para activar OCR. Instala Tesseract OCR o configura TESSERACT_CMD.")
         if total_chars==0:
             raise RuntimeError("OCR no pudo extraer texto de ninguna pagina. Revisa que Tesseract OCR este instalado y que OCR_LANG coincida con los idiomas disponibles.")
-        upd(j,35,"Texto extraido",f"{total_chars:,} caracteres · {len(ocr_pages)} paginas con OCR · {len(empty_pages)} paginas sin texto")
+        upd(j,35,"Texto extraido",f"{total_chars:,} caracteres · {len(ocr_pages)} paginas con OCR · {len(empty_pages)} paginas sin texto · "+ollama_runtime_info())
         print(f"[ 35%] Texto listo · {total_chars:,} caracteres · OCR {len(ocr_pages)}/{len(pages)} paginas",flush=True)
 
         # VISION: Qwen3-VL analiza cada pagina y devuelve cajas individuales.
@@ -372,62 +372,7 @@ def run(j,data):
                 vision_diag.append({"page":vi,"type":"vision_exception","response":str(ve)})
                 print(f"[VISION ERROR] pagina {vi}: {ve}",flush=True)
 
-        # PRIMER PASO DE IDENTIFICACION: resumimos OCR por pagina antes de Qwen.
-        compact_pages=[]
-        for p in pages:
-            cand=page_candidates(p["text"])
-            compact_pages.append(f"\n[PAGINA {p['page']}]\n"+"\n".join(cand))
-        chunks=[]; current=[]; chars=0; LIMIT=6500
-        for piece in compact_pages:
-            if current and chars+len(piece)>LIMIT:
-                chunks.append(current); current=[]; chars=0
-            current.append(piece); chars+=len(piece)
-        if current: chunks.append(current)
-
-        allp=list(vision_products); qwen_diag=list(vision_diag)
-        for ci,chunk in enumerate(chunks,1):
-            pct=38+int((ci-1)/max(len(chunks),1)*24)
-            upd(j,pct,f"Qwen3 · bloque {ci}/{len(chunks)}","Identificando nombres a partir del OCR")
-            print(f"[{pct:3d}%] Qwen3 · bloque {ci}/{len(chunks)}",flush=True)
-            try:
-                found,diag=text_identify("".join(chunk))
-                qwen_diag.extend([{"block":ci,"type":t,"response":v} for t,v in diag])
-            except Exception as e:
-                found=[]; qwen_diag.append({"block":ci,"type":"exception","response":str(e)})
-                print(f"[QWEN ERROR] bloque {ci}: {e}",flush=True)
-            for x in found:
-                page_nums=[n for n in x.get("pages",[]) if 1 <= n <= len(pages)]
-                if not page_nums:
-                    terms=[x["name"],x.get("variant",""),x.get("brand","")]
-                    for p in pages:
-                        if any(tok and len(tok)>2 and tok.lower() in p["text"].lower() for tok in terms):
-                            page_nums.append(p["page"])
-                x["pages"]=sorted(set(page_nums))
-                if x["pages"]:
-                    x["page"]=x["pages"][0]
-                    allp.append(x)
-
-        # Segundo pase compacto si el primero no produjo ningun candidato.
-        if not allp:
-            print("[QWEN FALLBACK] No hubo candidatos; ejecutando segundo pase compacto",flush=True)
-            fallback=[]
-            for p in pages:
-                cand=page_candidates(p["text"])
-                if cand:
-                    fallback.append(f"[PAGINA {p['page']}] "+" | ".join(cand[:18]))
-            for start in range(0,len(fallback),8):
-                block="\n".join(fallback[start:start+8])
-                try:
-                    found,diag=text_identify(block)
-                    qwen_diag.extend([{"block":f"fallback-{start//8+1}","type":t,"response":v} for t,v in diag])
-                    for x in found:
-                        pages_found=[n for n in x.get("pages",[]) if 1<=n<=len(pages)]
-                        if pages_found:
-                            x["pages"]=sorted(set(pages_found)); x["page"]=x["pages"][0]; allp.append(x)
-                except Exception as e:
-                    qwen_diag.append({"block":f"fallback-{start//8+1}","type":"exception","response":str(e)})
-
-        # Dedupe global del documento.
+        # La vision ya identifico cada producto y su caja.\n        # No ejecutamos un segundo pase Qwen sobre todo el OCR: duplicaba el trabajo\n        # y podia mezclar nombres de proveedores con nombres de perfumes.\n        allp=list(vision_products); qwen_diag=list(vision_diag)\n\n        # Dedupe global del documento.
         m={}
         for p in allp:
             k=re.sub(r"\s+"," ",(p["name"]+" "+p.get("brand","")+" "+p.get("variant","")).lower()).strip()
@@ -444,8 +389,8 @@ def run(j,data):
                 p.update({"found":False,"fragrantica_url":"","fragrantica_image_url":"","matched_title":"","image_url":""}); res.append(p)
 
         result={"products":res,"stats":{"pages":len(pages),"characters":total_chars,"ocr_pages":ocr_pages,"ocr_available":bool(tess),"empty_text_pages":empty_pages,"detected":len(allp),"unique":len(res),"found":sum(x.get("found",False) for x in res),"qwen_blocks":len(qwen_diag),"qwen_diagnostics":qwen_diag[:40]}}
-        print("[100%] Completado · analisis de texto terminado",flush=True)
-        with L: J[j].update(status="done",percent=100,stage="Completado",detail="Analisis de texto + OCR terminado",result=result)
+        print("[100%] Completado · analisis visual + OCR terminado",flush=True)
+        with L: J[j].update(status="done",percent=100,stage="Completado",detail="Analisis visual + OCR terminado",result=result)
     except Exception as e:
         print(f"[ERROR] {e}",flush=True)
         with L: J[j].update(status="error",percent=100,stage="Error",detail=str(e))
