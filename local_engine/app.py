@@ -1,4 +1,4 @@
-import os,re,json,time,uuid,threading,base64,io,shutil
+import os,re,json,time,uuid,threading,base64,io,shutil,requests
 from dotenv import load_dotenv
 load_dotenv()
 import fitz,requests,ollama
@@ -13,6 +13,8 @@ try: from ddgs import DDGS
 except Exception: DDGS=None
 
 TEXT_MODEL=os.getenv("QWEN_MODEL","qwen3-vl:8b-instruct").strip()
+VISION_TIMEOUT=int(os.getenv("VISION_TIMEOUT","120"))
+VISION_RETRIES=int(os.getenv("VISION_RETRIES","1"))
 HOST=os.getenv("OLLAMA_BASE_URL",os.getenv("OLLAMA_HOST","http://127.0.0.1:11434")).strip().rstrip("/")
 app=FastAPI(title="ZUASH PDF Text AI Engine",version="5.0.0")
 app.mount("/web",StaticFiles(directory="web"),name="web")
@@ -209,24 +211,51 @@ Devuelve SOLO JSON:
 Texto OCR de apoyo:
 """ + str(page_text or "")[:4500]
 
-    client=ollama.Client(host=HOST)
+    # Usamos HTTP directo contra Ollama para tener un timeout REAL de red.
+    # Si una pagina se atasca, el trabajo continua con la siguiente.
+    payload={
+        "model":TEXT_MODEL,
+        "messages":[{
+            "role":"user",
+            "content":prompt,
+            "images":[base64.b64encode(image_bytes).decode("ascii")]
+        }],
+        "stream":False,
+        "format":"json",
+        "think":False,
+        "keep_alive":"10m",
+        "options":{"temperature":0,"num_predict":500}
+    }
     diagnostics=[]
-    try:
-        r=client.chat(
-            model=TEXT_MODEL,
-            messages=[{"role":"user","content":prompt,"images":[image_bytes]}],
-            options={"temperature":0,"num_predict":500},
-            format="json",
-            think=False,
-            keep_alive="10m"
-        )
-        raw=r.get("message",{}).get("content","")
-        diagnostics.append(("vision",raw[:2000]))
-        return parse_vision_json(raw),diagnostics
-    except Exception as e:
-        diagnostics.append(("vision_error",str(e)))
-        return [],diagnostics
-
+    last_error=""
+    for attempt in range(VISION_RETRIES+1):
+        t0=time.time()
+        try:
+            r=requests.post(
+                HOST+"/api/chat",
+                json=payload,
+                timeout=(10, VISION_TIMEOUT)
+            )
+            elapsed=round(time.time()-t0,1)
+            if not r.ok:
+                raise RuntimeError(f"Ollama HTTP {r.status_code}: {r.text[:500]}")
+            data=r.json()
+            raw=(data.get("message") or {}).get("content","")
+            if not raw:
+                raise ValueError("Ollama devolvio message.content vacio")
+            diagnostics.append(("vision",f"pagina={page_number} intento={attempt+1} tiempo={elapsed}s respuesta={raw[:1800]}"))
+            return parse_vision_json(raw),diagnostics
+        except requests.exceptions.Timeout:
+            elapsed=round(time.time()-t0,1)
+            last_error=f"timeout despues de {elapsed}s"
+            diagnostics.append(("vision_timeout",f"pagina={page_number} intento={attempt+1} {last_error}"))
+        except Exception as e:
+            elapsed=round(time.time()-t0,1)
+            last_error=str(e)
+            diagnostics.append(("vision_error",f"pagina={page_number} intento={attempt+1} tiempo={elapsed}s {last_error}"))
+        if attempt < VISION_RETRIES:
+            time.sleep(1)
+    return [],diagnostics
 
 def parse_vision_json(raw):
     raw=str(raw or "").strip()
@@ -365,15 +394,24 @@ def run(j,data):
         upd(j,35,"Texto extraido",f"{total_chars:,} caracteres · {len(ocr_pages)} paginas con OCR · {len(empty_pages)} paginas sin texto · "+ollama_runtime_info())
         print(f"[ 35%] Texto listo · {total_chars:,} caracteres · OCR {len(ocr_pages)}/{len(pages)} paginas",flush=True)
 
-        # VISION: Qwen3-VL analiza cada pagina y devuelve cajas individuales.
+        # VISION: procesa UNA pagina a la vez. Cada llamada tiene timeout real;
+        # una pagina que falle no puede bloquear las siguientes.
         vision_products=[]
         vision_diag=[]
         for vi,pinfo in enumerate(pages,1):
+            page_started=time.time()
             try:
-                upd(j,36+int((vi-1)/max(len(pages),1)*20),f"Qwen3-VL · pagina {vi}/{len(pages)}","Analizando imagen de la pagina")
+                pct=36+int((vi-1)/max(len(pages),1)*20)
+                upd(j,pct,f"Qwen3-VL · pagina {vi}/{len(pages)}",
+                    f"Preparando imagen · timeout {VISION_TIMEOUT}s · {ollama_runtime_info()}")
+                print(f"[{pct:3d}%] VISION pagina {vi}/{len(pages)} · iniciando",flush=True)
+
                 png=page_png(doc[vi-1])
+                upd(j,pct,f"Qwen3-VL · pagina {vi}/{len(pages)}",
+                    f"Enviando imagen · {len(png)/1024:.0f} KB · max {VISION_TIMEOUT}s")
                 found,diag=vision_identify(png,pinfo["text"],vi)
                 vision_diag.extend([{"page":vi,"type":t,"response":v} for t,v in diag])
+
                 for vp in found:
                     try:
                         crop=crop_product(png,vp["box"])
@@ -383,13 +421,29 @@ def run(j,data):
                         vp["image_url"]=vp["crop_url"]
                     except Exception as ce:
                         print(f"[CROP ERROR] pagina {vi}: {ce}",flush=True)
-                    vp["page"]=vi; vp["pages"]=[vi]
+                    vp["page"]=vi
+                    vp["pages"]=[vi]
                     vision_products.append(vp)
-            except Exception as ve:
-                vision_diag.append({"page":vi,"type":"vision_exception","response":str(ve)})
-                print(f"[VISION ERROR] pagina {vi}: {ve}",flush=True)
 
-        # La vision ya identifico cada producto y su caja.\n        # No ejecutamos un segundo pase Qwen sobre todo el OCR: duplicaba el trabajo\n        # y podia mezclar nombres de proveedores con nombres de perfumes.\n        allp=list(vision_products); qwen_diag=list(vision_diag)\n\n        # Dedupe global del documento.
+                elapsed=round(time.time()-page_started,1)
+                upd(j,pct,f"Qwen3-VL · pagina {vi}/{len(pages)}",
+                    f"Pagina terminada en {elapsed}s · {len(found)} perfumes · continuando")
+                print(f"[{pct:3d}%] VISION pagina {vi}/{len(pages)} · {elapsed}s · {len(found)} productos",flush=True)
+
+            except Exception as ve:
+                elapsed=round(time.time()-page_started,1)
+                vision_diag.append({"page":vi,"type":"vision_exception","response":str(ve)})
+                upd(j,pct,f"Qwen3-VL · pagina {vi}/{len(pages)}",
+                    f"ERROR tras {elapsed}s · se omite esta pagina y continua")
+                print(f"[VISION ERROR] pagina {vi}: {ve} · continua",flush=True)
+                continue
+
+        # La vision ya identifico cada producto y su caja.
+        # No ejecutamos un segundo pase Qwen sobre todo el OCR: duplicaba el trabajo
+        # y podia mezclar nombres de proveedores con nombres de perfumes.
+        allp=list(vision_products); qwen_diag=list(vision_diag)
+
+        # Dedupe global del documento.
         m={}
         for p in allp:
             k=re.sub(r"\s+"," ",(p["name"]+" "+p.get("brand","")+" "+p.get("variant","")).lower()).strip()
