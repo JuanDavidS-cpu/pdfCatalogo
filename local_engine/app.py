@@ -336,13 +336,37 @@ def run(j,data):
     try:
         upd(j,2,"Recibiendo PDF","Archivo recibido",status="running")
         doc=fitz.open(stream=data,filetype="pdf")
-        pages,total_chars,empty_pages,ocr_pages,tess=extract_document(doc,j); doc.close()
+        pages,total_chars,empty_pages,ocr_pages,tess=extract_document(doc,j)
         if total_chars==0 and not tess:
             raise RuntimeError("El PDF no tiene capa de texto y no se encontro Tesseract para activar OCR. Instala Tesseract OCR o configura TESSERACT_CMD.")
         if total_chars==0:
             raise RuntimeError("OCR no pudo extraer texto de ninguna pagina. Revisa que Tesseract OCR este instalado y que OCR_LANG coincida con los idiomas disponibles.")
         upd(j,35,"Texto extraido",f"{total_chars:,} caracteres · {len(ocr_pages)} paginas con OCR · {len(empty_pages)} paginas sin texto")
         print(f"[ 35%] Texto listo · {total_chars:,} caracteres · OCR {len(ocr_pages)}/{len(pages)} paginas",flush=True)
+
+        # VISION: Qwen3-VL analiza cada pagina y devuelve cajas individuales.
+        vision_products=[]
+        vision_diag=[]
+        for vi,pinfo in enumerate(pages,1):
+            try:
+                upd(j,36+int((vi-1)/max(len(pages),1)*20),f"Qwen3-VL · pagina {vi}/{len(pages)}","Analizando imagen de la pagina")
+                png=page_png(doc[vi-1])
+                found,diag=vision_identify(png,pinfo["text"],vi)
+                vision_diag.extend([{"page":vi,"type":t,"response":v} for t,v in diag])
+                for vp in found:
+                    try:
+                        crop=crop_product(png,vp["box"])
+                        cname=f"{j}_{vi}_{len(vision_products)+1}_{uuid.uuid4().hex[:8]}.png"
+                        with open(os.path.join(OUT,cname),"wb") as fh: fh.write(crop)
+                        vp["crop_url"]="/api/crops/"+cname
+                        vp["image_url"]=vp["crop_url"]
+                    except Exception as ce:
+                        print(f"[CROP ERROR] pagina {vi}: {ce}",flush=True)
+                    vp["page"]=vi; vp["pages"]=[vi]
+                    vision_products.append(vp)
+            except Exception as ve:
+                vision_diag.append({"page":vi,"type":"vision_exception","response":str(ve)})
+                print(f"[VISION ERROR] pagina {vi}: {ve}",flush=True)
 
         # PRIMER PASO DE IDENTIFICACION: resumimos OCR por pagina antes de Qwen.
         compact_pages=[]
@@ -356,7 +380,7 @@ def run(j,data):
             current.append(piece); chars+=len(piece)
         if current: chunks.append(current)
 
-        allp=[]; qwen_diag=[]
+        allp=list(vision_products); qwen_diag=list(vision_diag)
         for ci,chunk in enumerate(chunks,1):
             pct=38+int((ci-1)/max(len(chunks),1)*24)
             upd(j,pct,f"Qwen3 · bloque {ci}/{len(chunks)}","Identificando nombres a partir del OCR")
@@ -482,6 +506,12 @@ async def generate_pdf(payload:dict):
     if not result or not result.get("products"): raise HTTPException(400,"No hay perfumes para generar")
     name="ZUASH_catalogo_"+uuid.uuid4().hex[:8]+".pdf"; path=os.path.join(OUT,name)
     make_pdf(result,path); return {"filename":name,"url":"/api/generated/"+name}
+
+@app.get("/api/crops/{name}")
+def crop_generated(name:str):
+    safe=os.path.basename(name); path=os.path.join(OUT,safe)
+    if not os.path.isfile(path): raise HTTPException(404,"Recorte no encontrado")
+    return FileResponse(path,media_type="image/png",filename=safe)
 
 @app.get("/api/generated/{name}")
 def generated(name:str):
