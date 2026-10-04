@@ -1,4 +1,6 @@
 import os,re,json,time,uuid,threading,base64,io,shutil
+from dotenv import load_dotenv
+load_dotenv()
 import fitz,requests,ollama
 from bs4 import BeautifulSoup
 from fastapi import FastAPI,File,UploadFile,HTTPException
@@ -10,8 +12,8 @@ from PIL import Image
 try: from ddgs import DDGS
 except Exception: DDGS=None
 
-TEXT_MODEL=os.getenv("QWEN_MODEL","qwen3:8b")
-HOST=os.getenv("OLLAMA_HOST","http://127.0.0.1:11434")
+TEXT_MODEL=os.getenv("QWEN_MODEL","qwen3-vl:8b").strip()
+HOST=os.getenv("OLLAMA_BASE_URL",os.getenv("OLLAMA_HOST","http://127.0.0.1:11434")).strip().rstrip("/")
 app=FastAPI(title="ZUASH PDF Text AI Engine",version="5.0.0")
 app.mount("/web",StaticFiles(directory="web"),name="web")
 J={}; L=threading.Lock(); OUT=os.path.join(os.path.dirname(__file__),"generated"); os.makedirs(OUT,exist_ok=True)
