@@ -191,40 +191,109 @@ def page_candidates(text):
             seen.add(k); uniq.append(line)
     return uniq[:35]
 
-def text_identify(text):
-    prompt="""Eres un extractor de nombres de perfumes. Analiza SOLO el texto OCR/PDF.
-Cada [PAGINA N] es una pagina independiente. Identifica nombres comerciales de perfumes/fragrancias que aparezcan realmente en el texto. El OCR puede tener errores de una o dos letras: corrige solo errores evidentes. Conserva numeros legitimos como 212, 9PM, 1 Million y variantes EDT, EDP, Parfum, Elixir, Intense, Absolu, etc.
-IGNORA precios, telefonos, codigos SKU, Instagram, WhatsApp, direcciones, nombres de proveedores, descuentos, mililitros y publicidad.
-Si solo puedes determinar el nombre y no la marca, deja brand vacio. NO inventes perfumes que no aparezcan.
-Devuelve TODOS los candidatos razonables. Devuelve SOLO este JSON:
-{"perfumes":[{"name":"","brand":"","variant":"","confidence":0.0,"pages":[1]}]}
-La confianza debe estar entre 0 y 1.
-"""
+def vision_identify(image_bytes, page_text, page_number):
+    prompt = """Analiza VISUALMENTE esta pagina de un catalogo de perfumes.
+Detecta TODOS los perfumes individuales visibles. Una pagina puede tener varios.
+NO uses la pagina completa como producto. NO detectes logos, telefonos, Instagram,
+WhatsApp, precios, SKU, proveedores ni publicidad.
+El nombre del perfume normalmente esta ENCIMA de su imagen. Usa ese texto y la
+botella/caja para identificarlo. Conserva numeros legitimos y variantes EDP, EDT,
+Elixir, Parfum, Intense, Absolu, etc. Corrige solo errores OCR evidentes.
+Para cada perfume devuelve una caja que encierre SOLO la botella/caja del perfume,
+sin el nombre y sin toda la tarjeta.
+Las coordenadas son normalizadas 0..1000: x,y,w,h.
+Devuelve SOLO JSON:
+{"products":[{"name":"","brand":"","variant":"","confidence":0.0,
+"box":{"x":0,"y":0,"w":0,"h":0},"evidence":""}]}
+
+Texto OCR de apoyo:
+""" + str(page_text or "")[:7000]
+
     client=ollama.Client(host=HOST)
     diagnostics=[]
     try:
-        r=client.chat(model=TEXT_MODEL,messages=[{"role":"user","content":prompt+"\n\n"+text}],options={"temperature":0},format="json",think=False,keep_alive="10m")
+        r=client.chat(
+            model=TEXT_MODEL,
+            messages=[{"role":"user","content":prompt,"images":[image_bytes]}],
+            options={"temperature":0},
+            format="json",
+            think=False,
+            keep_alive="10m"
+        )
         raw=r.get("message",{}).get("content","")
-        diagnostics.append(("main",raw[:1000]))
-        found=parse_json(raw)
-        if found: return found,diagnostics
+        diagnostics.append(("vision",raw[:2000]))
+        return parse_vision_json(raw),diagnostics
     except Exception as e:
-        diagnostics.append(("main_error",str(e)))
-    retry="""Extrae SOLO nombres de perfumes del siguiente texto OCR. Devuelve JSON exacto {"perfumes":[{"name":"","brand":"","variant":"","confidence":0.0,"pages":[1]}]}.
-Una linea que sea claramente un nombre de fragancia cuenta aunque la marca no sea visible. Ignora numeros de telefono, precios, redes sociales, SKU y proveedores. Corrige errores OCR evidentes pero no inventes nombres.
-TEXTO:
-"""+text
-    try:
-        r2=client.chat(model=TEXT_MODEL,messages=[{"role":"user","content":retry}],options={"temperature":0},format="json",think=False,keep_alive="10m")
-        raw2=r2.get("message",{}).get("content","")
-        diagnostics.append(("retry",raw2[:1000]))
-        return parse_json(raw2),diagnostics
-    except Exception as e:
-        diagnostics.append(("retry_error",str(e)))
+        diagnostics.append(("vision_error",str(e)))
         return [],diagnostics
+
+
+def parse_vision_json(raw):
+    raw=str(raw or "").strip()
+    if not raw:
+        raise ValueError("Qwen3-VL devolvio una respuesta vacia")
+    cleaned=raw.replace("'''","").replace("```json","").replace("```","").strip()
+    try:
+        obj,_=json.JSONDecoder().raw_decode(cleaned)
+    except Exception:
+        m=re.search(r'\{\s*"?(?:products|perfumes|items)"?\s*:\s*\[.*\]\s*\}',cleaned,re.S|re.I)
+        if not m: raise ValueError("Qwen3-VL no devolvio JSON valido: "+raw[:500])
+        obj=json.loads(m.group())
+    arr=next((obj.get(k) for k in ("products","perfumes","items") if isinstance(obj.get(k),list)),[])
+    out=[]
+    for x in arr:
+        if isinstance(x,str): x={"name":x}
+        if not isinstance(x,dict): continue
+        n=clean(x.get("name") or x.get("perfume") or x.get("title") or "")
+        if not n or len(n)>120: continue
+        low=n.lower()
+        if any(w in low for w in ("instagram","whatsapp","proveedor","precio","telefono","contacto","www.")): continue
+        box=x.get("box") or x.get("bbox") or {}
+        if not isinstance(box,dict): continue
+        def num(v):
+            try: return float(v)
+            except Exception: return None
+        xx,yy,ww,hh=[num(box.get(k)) for k in ("x","y","w","h")]
+        if None in (xx,yy,ww,hh):
+            x1,y1,x2,y2=[num(box.get(k)) for k in ("x1","y1","x2","y2")]
+            if None not in (x1,y1,x2,y2): xx,yy,ww,hh=x1,y1,x2-x1,y2-y1
+        if None in (xx,yy,ww,hh): continue
+        if max(abs(xx),abs(yy),abs(ww),abs(hh))<=1.01: xx*=1000;yy*=1000;ww*=1000;hh*=1000
+        elif max(abs(xx),abs(yy),abs(ww),abs(hh))<=100.5: xx*=10;yy*=10;ww*=10;hh*=10
+        xx=max(0,min(1000,xx)); yy=max(0,min(1000,yy))
+        ww=max(0,min(1000-xx,ww)); hh=max(0,min(1000-yy,hh))
+        if ww<30 or hh<30 or (ww*hh)/1000000>0.72: continue
+        try: conf=float(x.get("confidence",x.get("confianza",0)) or 0)
+        except Exception: conf=0
+        out.append({
+            "name":n,
+            "brand":clean(x.get("brand") or x.get("marca") or ""),
+            "variant":clean(x.get("variant") or x.get("version") or ""),
+            "confidence":max(0,min(1,conf)),
+            "box":{"x":xx,"y":yy,"w":ww,"h":hh},
+            "evidence":clean(x.get("evidence") or x.get("evidencia") or "")
+        })
+    return out
+
+
 def page_png(page):
-    pix=page.get_pixmap(matrix=fitz.Matrix(1.5,1.5),alpha=False)
+    pix=page.get_pixmap(matrix=fitz.Matrix(2.0,2.0),alpha=False)
     return pix.tobytes("png")
+
+
+def crop_product(png_bytes,box):
+    im=Image.open(io.BytesIO(png_bytes)).convert("RGB")
+    W,H=im.size
+    x=max(0,min(W-1,int(box["x"]/1000*W)))
+    y=max(0,min(H-1,int(box["y"]/1000*H)))
+    r=max(x+1,min(W,int((box["x"]+box["w"])/1000*W)))
+    b=max(y+1,min(H,int((box["y"]+box["h"])/1000*H)))
+    mx=max(4,int((r-x)*.04)); my=max(4,int((b-y)*.04))
+    x=max(0,x-mx); y=max(0,y-my); r=min(W,r+mx); b=min(H,b+my)
+    crop=im.crop((x,y,r,b))
+    bio=io.BytesIO(); crop.save(bio,format="PNG",optimize=True)
+    return bio.getvalue()
+
 
 def fragrantica(q):
     urls=[]; h={"User-Agent":"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/154 Safari/537.36"}
